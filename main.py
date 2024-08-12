@@ -582,6 +582,7 @@ while True:
     def face_analyser_thread(frame, sw):
         global alpha, codeformer
         original_frame = frame
+        has_face = True
         if not args['cli']:
             test1 = alpha != 0
         else:
@@ -659,8 +660,12 @@ while True:
             if test1:
                 print(alpha)
                 frame = merge_face(frame, original_frame, alpha)
-            return bboxes, frame, original_frame
-        return [], frame, original_frame
+            if len(faces) == 0:
+                has_face = False
+            return bboxes, frame, original_frame, has_face
+        if len(faces) == 0:
+            has_face = False
+        return [], frame, original_frame, has_face
 
     def cv2_image_to_tkinter(cv2_image, target_width, target_height):
         """Convert a cv2 image to a tkinter compatible format and resize it to fit target dimensions."""
@@ -715,14 +720,15 @@ while True:
 
     def process_image(input_path, output_path, sw):
         image = cv2.imread(input_path)
-        bbox, image, original_frame = face_analyser_thread(image,sw)
+        bbox, image, original_frame, has_face = face_analyser_thread(image,sw)
         try:
             test1 = checkbox_var.get() == 1
         except:
             test1 = False
         if test1 or (args['face_enhancer'] != 'none' and args['cli']):
             image = restorer_enhance(image)
-        cv2.imwrite(output_path, image)
+        if has_face:
+            cv2.imwrite(output_path, image)
 
     def just_preload_them(sw, frame):
         for i in range(int(args['threads'])):
@@ -887,11 +893,11 @@ while True:
                             if len(temp) < int(args['threads']) * len(face_swappers) and ret:
                                 continue
                             while len(temp) >= int(args['threads']) * len(face_swappers):
-                                bbox, frame, original_frame = temp.pop(0).join()
+                                bbox, frame, original_frame, has_face = temp.pop(0).join()
                             xxs = True
                         else:
                             if not frame_index == old_index:
-                                bbox, frame, original_frame = face_analyser_thread(get_nth_frame(cap, frame_index-1), count%len(face_swappers))
+                                bbox, frame, original_frame, has_face = face_analyser_thread(get_nth_frame(cap, frame_index-1), count%len(face_swappers))
                             xxs = False
                         if not args['cli']:
                             if show_bbox_var.get() == 1:
@@ -921,7 +927,7 @@ while True:
                         if not args['cli']:
                             if show_external_swapped_preview_var.get() == 1:
                                 cv2.imshow('swapped frame', frame)
-                        if runnable == 0 and ((not runnable and not args['cli']) or args['cli']) and xxs:
+                        if runnable == 0 and ((not runnable and not args['cli']) or args['cli']) and xxs and has_face:
                             out.write(frame)
                         
                         if args['vcam']:
@@ -948,7 +954,7 @@ while True:
                             return
                         print(f"HUSTON, WE HAD AN EXCEPTION, PROCEED WITH CAUTION, SEND RICHARD THIS: {e}. Line 947")
                 for i in temp:
-                    bbox, frame, original_frame = i.join()
+                    bbox, frame, original_frame, has_face = i.join()
                     if not args['cli']:
                         if show_bbox_var.get() == 1:
                             for i in bbox: 
@@ -966,7 +972,7 @@ while True:
                             vram_usage, gpu_usage = round(gpu_memory_total - torch.cuda.mem_get_info(device)[0] / 1024**3,2), torch.cuda.utilization(device=device)
                             progressbar.set_description(f"VRAM: {vram_usage}/{gpu_memory_total} GB, usage: {gpu_usage}%")
                     
-                    if runnable == 0 and ((not runnable and not args['cli']) or args['cli']):
+                    if runnable == 0 and ((not runnable and not args['cli']) or args['cli']) and has_face:
                         out.write(frame)
                     if args['vcam']:
                         cam.send(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
