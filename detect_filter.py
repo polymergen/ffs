@@ -8,6 +8,8 @@ import onnxruntime as rt
 from swapperfp16 import get_model
 import pdb
 
+from concurrent.futures import ThreadPoolExecutor
+
 
 def get_sess_options():
     sess_options = rt.SessionOptions()
@@ -29,7 +31,7 @@ def get_analyser(providers):
   return face_analyser
 
 def find_face(frame, face_analyser):
-    
+
     faces = face_analyser.get(frame)
     return len(faces) > 0
 
@@ -75,53 +77,92 @@ def process_video(input_video, output_video, provider_list):
     return frame_info, fps
 
 
+# The create_audio_cut_list function remains unchanged
 def create_audio_cut_list(frame_info, fps):
-		cut_list = []
-		start_time = 0
+    cut_list = []
+    start_time = 0
 
-		for i, frame in enumerate(frame_info):
-				if i == 0 or frame != frame_info[i - 1] + 1:
-						if i > 0:
-								end_time = frame_info[i - 1] / fps
-								cut_list.append((start_time, end_time))
-						start_time = frame / fps
+    for i, frame in enumerate(frame_info):
+        if i == 0 or frame != frame_info[i - 1] + 1:
+            if i > 0:
+                end_time = frame_info[i - 1] / fps
+                cut_list.append((start_time, end_time))
+            start_time = frame / fps
 
-		# Add the last segment
-		if frame_info:
-				cut_list.append((start_time, frame_info[-1] / fps))
+    # Add the last segment
+    if frame_info:
+        cut_list.append((start_time, frame_info[-1] / fps))
 
-		return cut_list
+    return cut_list
+
+
+def create_audio_cut_list(frame_info, fps):
+    cut_list = []
+    start_time = 0
+
+    for i, frame in enumerate(frame_info):
+        if i == 0 or frame != frame_info[i - 1] + 1:
+            if i > 0:
+                end_time = frame_info[i - 1] / fps
+                cut_list.append((start_time, end_time))
+            start_time = frame / fps
+
+    # Add the last segment
+    if frame_info:
+        cut_list.append((start_time, frame_info[-1] / fps))
+
+    return cut_list
+
+
+import subprocess
+import tempfile
+import os
 
 
 def cut_audio_and_merge(input_video, face_swapped_video, cut_list, output_video):
     filters = []
-    chunk_size =  10
-    for i in range(0, len(cut_list), chunk_size):
-        chunk = cut_list[i : i + chunk_size]
-        cut_list_str = "|".join(
-            [f"between(t,{start:.3f},{end:.3f})" for start, end in chunk]
+    for i, (start, end) in enumerate(cut_list):
+        filters.append(
+            f"[0:a]aselect='between(t,{start:.3f},{end:.3f})',asetpts=N/SR/TB[aud{i}];"
         )
-        filters.append(f"[0:a]aselect='{cut_list_str}',asetpts=N/SR/TB[aud{i}];")
 
-    filter_complex = "".join(filters) + f"concat=n={len(filters)}:v=0:a=1[aout]"
+    audio_streams = "".join(f"[aud{i}]" for i in range(len(cut_list)))
+    filter_complex = (
+        "".join(filters) + f"{audio_streams}concat=n={len(cut_list)}:v=0:a=1[aout]"
+    )
 
-    command = [
-        "ffmpeg",
-        "-i",
-        input_video,
-        "-i",
-        face_swapped_video,
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[aout]",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "256k",
-        output_video,
-    ]
-    subprocess.run(command, check=True)
+    # Create a temporary file to store the filter_complex
+    with tempfile.NamedTemporaryFile(
+        mode="w", delete=False, suffix=".txt"
+    ) as temp_file:
+        temp_file.write(filter_complex)
+        temp_file_path = temp_file.name
+
+    try:
+        command = [
+            "ffmpeg",
+            "-i",
+            input_video,
+            "-i",
+            face_swapped_video,
+            "-filter_complex_script",
+            temp_file_path,
+            "-map",
+            "1:v",  # Use video from the face-swapped video
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",  # Copy video codec to avoid re-encoding
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            output_video,
+        ]
+        subprocess.run(command, check=True)
+    finally:
+        # Clean up the temporary file
+        os.unlink(temp_file_path)
 
 
 providers = [
@@ -148,7 +189,7 @@ providers = [
 ]
 
 # Main process
-input_video = "D:\\awan\\iCloudDrive\\CloudData\\Settings\\Config\\Google\\UserSettings\\Mapdata\\yShatioumnosinU\\CorpAtlantic_part3.verilog"
+input_video = "D:\\awan\\iCloudDrive\\CloudData\\Settings\\Config\\Google\\UserSettings\\Mapdata\\MiYaaukmi\\MapSamples\\geRairIaijsIEiatHltSendtauRymtbotnegeknibAktnnmutSngn.mif"
 output_video = "D:\\ini\\UserSettings\\Google\\Config\\LandingZone\\outputs\\temp.mp4"
 final_output = "D:\\ini\\UserSettings\\Google\\Config\\LandingZone\\outputs\\test_final.mp4"
 
