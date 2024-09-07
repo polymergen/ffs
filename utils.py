@@ -716,7 +716,7 @@ def create_new_cap(file, face_, output_,batch_post="", grim=False):
             file = int(file)
     else:
         video_type = 'video'
-    if video_type.startswith('video'):
+    if video_type.startswith('video') or 'inode' in video_type:
         if batch_post != "":
             if not batch_post.endswith(".mp4"):
                 batch_post += ".mp4"
