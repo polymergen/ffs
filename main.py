@@ -1272,7 +1272,7 @@ while True:
                             elif enhancer_choice_value == "gfpgan":
                                 facex = restorer_enhance(facer)
                             elif enhancer_choice_value == "gfpgan onnx" or enhancer_choice_value == "gpfgan_onnx":
-                                facex = load_gfpganonnx().forward(facer)
+                                facex, _= load_gfpganonnx().forward(facer)
                             elif enhancer_choice_value == "real esrgan" or enhancer_choice_value == "real_esrgan":
                                 facex = realesrgan_enhance(facer)
                             facex = cv2.resize(facex, ((x2-x1), (y2-y1)))
@@ -1346,7 +1346,7 @@ while True:
                                 elif enhancer_choice_value == "gfpgan":
                                     facex = restorer_enhance(facer)
                                 elif enhancer_choice_value == "gfpgan onnx" or enhancer_choice_value == "gpfgan_onnx":
-                                    facex = load_gfpganonnx().forward(facer)
+                                    facex, _= load_gfpganonnx().forward(facer)
                                 elif enhancer_choice_value == "real esrgan" or enhancer_choice_value == "real_esrgan":
                                     facex = realesrgan_enhance(facer)
                                 facex = cv2.resize(facex, ((x2-x1), (y2-y1)))
