@@ -137,7 +137,18 @@ def kill_ui():
     global root
     root.destroy()
 def get_source_face():
-    global current_video
+    global current_video, videos
+    print(f"[GET_SOURCE_FACE:main] Getting source face for video {current_video}")
+    
+    # Bounds checking to prevent IndexError
+    if len(videos) == 0:
+        print(f"[GET_SOURCE_FACE:main] No videos available")
+        return None
+        
+    if current_video < 0 or current_video >= len(videos):
+        print(f"[GET_SOURCE_FACE:main] Invalid current_video index: {current_video}")
+        return None
+    
     #if isinstance(globalsz.source_face, NoneType):
         #try:
             #globalsz.source_face = sorted(face_analysers[0].get(cv2.imread(args['face'])), key=lambda x: x.bbox[0])[0]
@@ -146,7 +157,7 @@ def get_source_face():
         #    if not args['cli']:
         #        show_error_custom(text = f"HUSTON, WE HAVE A PROBLEM. WE CAN'T DETECT THE FACE IN THE IMAGE YOU PROVIDED! ERROR: {e}")
         #        kill_ui()
-    return videos[current_video]['face'] #globalsz.source_face
+    return videos[current_video].get('face', None) #globalsz.source_face
 def start_swapper(sw):
     import pickle
     with open('ll.pkl', 'rb') as file:
@@ -190,10 +201,30 @@ if not args['lowmem']:
         prepare()
     
 def select_face():
-    global args, select_face_label
+    global args, select_face_label, videos, current_video
     filex = askopenfilename(title="Select a face")
     if filex:
+        print(f"[FACE_SELECT:main] New face selected: {filex}")
         args['face'] = filex
+        
+        # Force regeneration of swapped frames for all videos
+        print(f"[FACE_SELECT:main] Invalidating swapped frames for all videos")
+        for i, video in enumerate(videos):
+            if 'swapped_image' in video:
+                video['swapped_image'] = None
+                print(f"[FACE_SELECT:main] Invalidated swapped frame for video {i}")
+        
+        # Force immediate reprocessing of current video's frame
+        if len(videos) > 0 and current_video < len(videos):
+            try:
+                current_vid = videos[current_video]
+                if 'original_image' in current_vid and current_vid['original_image'] is not None:
+                    print(f"[FACE_SELECT:main] Reprocessing current video frame")
+                    # This will trigger face swapping with new face
+                    current_vid['needs_reprocess'] = True
+            except Exception as e:
+                print(f"[FACE_SELECT:error] Failed to reprocess frame: {e}")
+    
     select_face_label.config(text=f'Face filename: {args["face"]}')
 
 def select_target():
@@ -487,22 +518,105 @@ while True:
         usage_label1.grid(row=row_counter, column=0)
         row_counter += 1
         
-        if not args['nocuda'] and not args['apple']:
-            usage_label2 = tk.Label(left_frame, fg=text_color, bg=background_color)
-            usage_label2.grid(row=row_counter, column=0)
-            row_counter += 1
+        if not args['nocuda'] and not args['apple']:        usage_label2 = tk.Label(left_frame, fg=text_color, bg=background_color)
+        usage_label2.grid(row=row_counter, column=0)
+        row_counter += 1
         
-        #if args['preview']:
+        def ensure_frame_loaded_and_update_preview():
+            """Ensure frame data is loaded for current video and update previews"""
+            global videos, current_video, face_swappers
+            
+            try:
+                # Bounds checking
+                if len(videos) == 0 or current_video < 0 or current_video >= len(videos):
+                    print(f"[FRAME_LOADER:main] Invalid video access, current_video: {current_video}, total: {len(videos)}")
+                    return
+                
+                current_vid = videos[current_video]
+                frame_index = current_vid.get("current_frame_index", 1)
+                
+                print(f"[FRAME_LOADER:main] Loading frame {frame_index} for video {current_video}")
+                
+                # Get the frame from video
+                if current_vid.get('type') == 0:  # Image
+                    frame = current_vid.get("original_image")
+                    if frame is None:
+                        frame = cv2.imread(current_vid['target_path']) if current_vid.get('grim') else current_vid.get("original_image")
+                else:  # Video
+                    frame = get_frame(current_vid, frame_index - 1)  # Convert to 0-based index
+                
+                if frame is not None:
+                    # Update original frame in video data
+                    current_vid['original_image'] = frame.copy()
+                    
+                    # Process frame for face swapping if source face is available
+                    try:
+                        if hasattr(get_source_face, '__call__') and face_swappers and len(face_swappers) > 0:
+                            bbox, swapped_image, original_image = face_analyser_thread(frame, 0)  # Use first swapper
+                            current_vid['swapped_image'] = swapped_image
+                            current_vid['original_image'] = original_image
+                            print(f"[FRAME_LOADER:main] Frame {frame_index} swapped successfully")
+                        else:
+                            # No swapping available, use original as swapped
+                            current_vid['swapped_image'] = frame.copy()
+                            print(f"[FRAME_LOADER:main] No swapping available, using original frame")
+                    except Exception as e:
+                        print(f"[FRAME_LOADER:main] Error during face swapping: {e}")
+                        current_vid['swapped_image'] = frame.copy()
+                    
+                    # Force preview update
+                    frame_updater(False)
+                    print(f"[FRAME_LOADER:main] Frame {frame_index} loaded and preview updated")
+                else:
+                    print(f"[FRAME_LOADER:main] Failed to load frame {frame_index}")
+                    
+            except Exception as e:                print(f"[FRAME_LOADER:main] Error in ensure_frame_loaded_and_update_preview: {e}")
+        
         def on_slider_move(value):
-            global videos
-            videos[current_video]["current_frame_index"] = int(value)
+            global videos, current_video
+            print(f"[SLIDER_MOVE:main] Moving to frame {value}")
+            
+            # Bounds checking to prevent IndexError
+            if len(videos) == 0:
+                print(f"[SLIDER_MOVE:main] No videos available")
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[SLIDER_MOVE:main] Invalid current_video index: {current_video}")
+                return
+            
+            videos[current_video]["current_frame_index"] = int(value)            # Force frame loading and preview update
+            ensure_frame_loaded_and_update_preview()
+            print(f"[SLIDER_MOVE:main] Frame {value} loaded and preview updated")
         
         def edit_index(amount):
-            global videos
+            global videos, current_video
+            print(f"[EDIT_INDEX:main] Editing index by {amount}")
+            
+            # Bounds checking to prevent IndexError  
+            if len(videos) == 0:
+                print(f"[EDIT_INDEX:main] No videos available")
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[EDIT_INDEX:main] Invalid current_video index: {current_video}")
+                return
+            
             mini = 0
             maxi = videos[current_video]['frame_number']
-            videos[current_video]["current_frame_index"] += amount
-            slider.set(videos[current_video]["current_frame_index"])
+            new_index = videos[current_video]["current_frame_index"] + amount
+            
+            # Clamp to valid range
+            new_index = max(mini, min(new_index, maxi))
+            videos[current_video]["current_frame_index"] = new_index
+            
+            try:
+                slider.set(new_index)
+                # Force frame loading and preview update
+                ensure_frame_loaded_and_update_preview()
+                print(f"[EDIT_INDEX:main] Set frame to {new_index}, loaded and preview updated")
+            except Exception as e:
+                print(f"[EDIT_INDEX:main] Failed to update slider: {e}")
         
         
         def edit_play(amount):
@@ -541,13 +655,23 @@ while True:
         frame_back_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         frame_back_button = tk.Button(button_frame, text='▶', bg=button_color, fg=text_color, width=button_width, command=lambda: edit_play(1), anchor="center")
-        frame_back_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
+        frame_back_button.pack(side=tk.LEFT, fill=tk.X, expand=True)        
         frame_forward_button = tk.Button(button_frame, text='>', bg=button_color, fg=text_color, width=button_width, command=lambda: edit_index(1), anchor="center")
         frame_forward_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
             
         def run_it_please():
             global count, videos, current_video
+            print(f"[RUN_IT:main] Starting rendering for video {current_video}")
+            
+            # Bounds checking to prevent IndexError
+            if len(videos) == 0:
+                print(f"[RUN_IT:main] No videos available")
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[RUN_IT:main] Invalid current_video index: {current_video}")
+                return
+            
             videos[current_video]['rendering'] = True
             videos[current_video]['current_frame_index'] = 0
             videos[current_video]['count'] = -1
@@ -555,8 +679,20 @@ while True:
             stop_rendering_button.config(state=tk.ACTIVE)
             if videos[current_video]['type'] == 1:
                 videos[current_video]['cap'].set(cv2.CAP_PROP_POS_FRAMES, 0)
+                
         def not_run_it_please():
             global count, videos, current_video
+            print(f"[NOT_RUN_IT:main] Stopping rendering for video {current_video}")
+            
+            # Bounds checking to prevent IndexError
+            if len(videos) == 0:
+                print(f"[NOT_RUN_IT:main] No videos available")
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[NOT_RUN_IT:main] Invalid current_video index: {current_video}")
+                return
+            
             videos[current_video]['rendering'] = False
             videos[current_video]['current_frame_index'] = 0
             videos[current_video]['count'] = -1
@@ -616,9 +752,25 @@ while True:
         show_external_swapped_preview = ttk.Checkbutton(left_frame, text="Show swapped frame in another window", variable=show_external_swapped_preview_var, style="TCheckbutton")
         show_external_swapped_preview.grid(row=row_counter, column=0)
         show_external_swapped_preview_var.set(0)
-        row_counter += 1'''
+        row_counter += 1
+        '''
         def unselect_face():
-            global target_embedding, old_index, args, videos
+            global target_embedding, old_index, args, videos, current_video
+            print(f"[UNSELECT_FACE:main] Unselecting face")
+            
+            # Bounds checking to prevent IndexError
+            if len(videos) == 0:
+                print(f"[UNSELECT_FACE:main] No videos available")
+                args['selective'] = ''
+                target_embedding = None
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[UNSELECT_FACE:main] Invalid current_video index: {current_video}")
+                args['selective'] = ''
+                target_embedding = None
+                return
+            
             args['selective'] = ''
             target_embedding = None
             videos[current_video]['old_number'] = -1
@@ -1046,9 +1198,25 @@ while True:
             root.grid_columnconfigure(3, weight=1)
             root.grid_rowconfigure(0, weight=1) 
             root.grid_rowconfigure(1, weight=1)
+            
         def on_image_click(event):
-            global target_embedding, old_index, args
+            global target_embedding, old_index, args, current_video
+            print(f"[IMAGE_CLICK:main] Image clicked for face selection")
+            
             if face_selector_var.get() == 1:
+                # Bounds checking to prevent IndexError
+                if len(videos) == 0:
+                    print(f"[IMAGE_CLICK:main] No videos available")
+                    return
+                    
+                if current_video < 0 or current_video >= len(videos):
+                    print(f"[IMAGE_CLICK:main] Invalid current_video index: {current_video}")
+                    return
+                
+                if 'original_image' not in videos[current_video] or videos[current_video]['original_image'] is None:
+                    print(f"[IMAGE_CLICK:main] No original image available")
+                    return
+                
                 image = original_image_label.image
                 image_width = image.width()
                 image_height = image.height()
@@ -1069,6 +1237,7 @@ while True:
                         args['selective'] = True
                         target_embedding = get_embedding(this_face)[0]
                         videos[current_video]['old_number'] = -1
+                        print(f"[IMAGE_CLICK:main] Face selected and target embedding updated")
                         cv2.imshow("cropped face", this_face)
                         cv2.waitKey(0)
                         try:
@@ -1101,25 +1270,91 @@ while True:
         def update_wraplength(event):
             select_face_label.config(wraplength=left_frame.winfo_width() - 20)  # Subtract a small padding
             select_target_label.config(wraplength=left_frame.winfo_width() - 20)  # Subtract a small padding
-            select_output_label.config(wraplength=left_frame.winfo_width() - 20)  # Subtract a small padding
-
-        root.bind("<Left>", left_arrow_click)
+            select_output_label.config(wraplength=left_frame.winfo_width() - 20)  # Subtract a small padding        root.bind("<Left>", left_arrow_click)
         root.bind("<Right>", right_arrow_click)
         root.bind("<space>", space_click)
         root.bind("<Configure>", update_wraplength)
         right_control_frame = tk.Frame(root, bg=background_color)
         right_control_frame.grid(row=0, column=0, rowspan=2, sticky="ns")
+        
         def add():
-            global videos
+            global videos, current_video
+            print(f"[ADD_VIDEO:main] Adding new video")
+            
+            # Bounds checking before adding
+            if len(videos) == 0:
+                current_video = 0
+                print(f"[ADD_VIDEO:main] First video, setting current_video to 0")
+            
             try:
                 facex = sorted(face_analysers[0].get(cv2.imread(args["face"])), key=lambda x: x.bbox[0])[0]
                 videos.append(create_new_cap(args['target_path'], facex, args['output'],))
+                print(f"[ADD_VIDEO:main] Video added successfully, total videos: {len(videos)}")
+                
+                # Ensure newly added video has its first frame loaded
+                if len(videos) > 0:
+                    # If this is the first video, make sure current_video is set correctly
+                    if current_video < 0 or current_video >= len(videos):
+                        current_video = len(videos) - 1  # Select the newly added video
+                        print(f"[ADD_VIDEO:main] Set current_video to newly added video: {current_video}")
+                    
+                    # Force frame loading for the current video
+                    ensure_frame_loaded_and_update_preview()
+                    print(f"[ADD_VIDEO:main] Frame loaded for newly added video")
+                
+                # Update UI after adding video
+                frame_updater()
+                print(f"[ADD_VIDEO:main] UI refreshed after video addition")
+                
             except Exception as e:
-                show_error_custom(text=f"Wait few seconds and try again, program didn't start yet (I will not notify you). debug error: {e}")
+                show_error_custom(text=f"Wait few seconds and try again, program didn't start yet I will not notify you). debug error: {e}")
+                print(f"[ADD_VIDEO:error] Failed to add video: {e}")
+        
         def delete_current_video():
             global videos, current_video
+            print(f"[DELETE_VIDEO:main] Deleting video at index {current_video}")
+            
+            if len(videos) == 0:
+                print(f"[DELETE_VIDEO:main] No videos to delete")
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[DELETE_VIDEO:main] Invalid video index: {current_video}")
+                return
+            
+            # Clean up resources before deletion
+            try:
+                video = videos[current_video]
+                if 'cap' in video and video['cap'] is not None:
+                    video['cap'].release()
+                    print(f"[DELETE_VIDEO:main] Released video capture")
+                if 'out' in video and video['out'] is not None:
+                    video['out'].release()
+                    print(f"[DELETE_VIDEO:main] Released video writer")
+            except Exception as e:
+                print(f"[DELETE_VIDEO:error] Resource cleanup failed: {e}")
+            
             videos.pop(current_video)
-            current_video = 0
+            
+            # Safely adjust current_video index
+            if len(videos) == 0:
+                current_video = -1
+                print(f"[DELETE_VIDEO:main] All videos deleted, current_video set to -1")
+            elif current_video >= len(videos):
+                current_video = len(videos) - 1
+                print(f"[DELETE_VIDEO:main] Current video adjusted to {current_video}")
+            
+            # Ensure frame loading for the new current video (if any)
+            if len(videos) > 0 and current_video >= 0:
+                try:
+                    ensure_frame_loaded_and_update_preview()
+                    print(f"[DELETE_VIDEO:main] Frame loaded for new current video {current_video}")
+                except Exception as e:
+                    print(f"[DELETE_VIDEO:error] Failed to load frame for new current video: {e}")
+            
+            # Force GUI update after deletion
+            frame_updater()
+            print(f"[DELETE_VIDEO:main] Video deleted successfully, UI refreshed")
         #yes, one day Im going to release that thing
         button_select_face = tk.Button(right_control_frame, text='Select face',bg=button_color, fg=text_color, command=select_face)
         button_select_face.grid(row=0, column=0, pady=3, sticky='ew')
@@ -1419,25 +1654,47 @@ while True:
         pil_image_resized = pil_image.resize((width, height), Image.Resampling.LANCZOS)
         
         return ImageTk.PhotoImage(pil_image_resized)
+        
     def frame_updater(xx=True):
         try:
-            if not isinstance(videos[current_video]['original_image'], NoneType) and not isinstance(videos[current_video]['swapped_image'], NoneType):
+            # Bounds checking to prevent IndexError
+            if len(videos) == 0:
+                print(f"[FRAME_UPDATER:main] No videos available")
+                # Clear displays
+                original_image_label.configure(image=None)
+                original_image_label.image = None
+                swapped_image_label.configure(image=None)
+                swapped_image_label.image = None
+                return
+                
+            if current_video < 0 or current_video >= len(videos):
+                print(f"[FRAME_UPDATER:main] Invalid current_video index: {current_video}")
+                # Clear displays
+                original_image_label.configure(image=None)
+                original_image_label.image = None
+                swapped_image_label.configure(image=None)
+                swapped_image_label.image = None
+                return
+            
+            current_vid = videos[current_video]  # Cache reference for cleaner code
+            
+            if not isinstance(current_vid.get('original_image'), NoneType) and not isinstance(current_vid.get('swapped_image'), NoneType):
                     sizex1, sizey1 = right_frame1.winfo_width(), right_frame1.winfo_height()
                     sizex2, sizey2 = right_frame2.winfo_width(), right_frame2.winfo_height()
-                    tk_imagex = cv2_image_to_tkinter(videos[current_video]['original_image'], sizex1, sizey1)
+                    tk_imagex = cv2_image_to_tkinter(current_vid['original_image'], sizex1, sizey1)
                     original_image_label.configure(image=tk_imagex)
                     original_image_label.image = tk_imagex  # Keep a reference to prevent garbage collection
-                    tk_image = cv2_image_to_tkinter(videos[current_video]['swapped_image'], sizex2, sizey2)
+                    tk_image = cv2_image_to_tkinter(current_vid['swapped_image'], sizex2, sizey2)
                     swapped_image_label.configure(image=tk_image)
                     swapped_image_label.image = tk_image
                     if original_image_second_open:
                         sizex1, sizey1 = original_image_label_second.winfo_width(), original_image_label_second.winfo_height()
-                        tk_imagex = cv2_image_to_tkinter(videos[current_video]['original_image'], sizex1, sizey1,0,0)
+                        tk_imagex = cv2_image_to_tkinter(current_vid['original_image'], sizex1, sizey1,0,0)
                         original_image_label_second.configure(image=tk_imagex)
                         original_image_label_second.image = tk_imagex  # Keep a reference to prevent garbage collection
                     if swapped_image_second_open:
                         sizex2, sizey2 = swapped_image_second_window.winfo_width(), swapped_image_second_window.winfo_height()
-                        tk_image = cv2_image_to_tkinter(videos[current_video]['swapped_image'], sizex2, sizey2, 0,0)
+                        tk_image = cv2_image_to_tkinter(current_vid['swapped_image'], sizex2, sizey2, 0,0)
                         swapped_image_label_second.configure(image=tk_image)
                         swapped_image_label_second.image = tk_image  # Keep a reference to prevent garbage collection
                         
@@ -1454,7 +1711,7 @@ while True:
                         swapped_image_label_second.image = None  # Keep a reference to prevent garbage collection
 
         except Exception as e:
-            
+            print(f"[FRAME_UPDATER:main] Error in frame_updater: {e}")
             original_image_label.configure(image=None)
             original_image_label.image = None  # Keep a reference to prevent garbage collection
             swapped_image_label.configure(image=None)
@@ -1874,10 +2131,22 @@ while True:
         if not args['cli']:
             listik = [0, 1, 0, 0, 0]
             threading.Thread(target=main).start()
+            
             def update_gui(old_index=0):
-                global frame_index
+                global frame_index, current_video
                 try:
                     update_progress_bar(7, listik[0], listik[1], listik[2], listik[3], listik[4])
+                    
+                    # Bounds checking to prevent IndexError
+                    if len(videos) == 0:
+                        print(f"[UPDATE_GUI:main] No videos available")
+                        root.after(300, update_gui, old_index)
+                        return
+                        
+                    if current_video < 0 or current_video >= len(videos):
+                        print(f"[UPDATE_GUI:main] Invalid current_video index: {current_video}")
+                        root.after(300, update_gui, old_index)
+                        return
                     
                     #if args['preview']:
                     if old_index != videos[current_video]['current_frame_index']:  
@@ -1887,11 +2156,12 @@ while True:
                         slider.config(to=videos[current_video]["frame_number"])
                         frame_count_label.config(text=f"total frames: {videos[current_video]['frame_number']}") 
                     except:
-                        pass
-
-                except:
+                        pass                
+                except Exception as e:
+                    print(f"[UPDATE_GUI:main] Error in update_gui: {e}")
                     pass
                 root.after(300, update_gui, old_index)
+            
             def update_selector(old_len = 0):
                 global current_video
                 try:
@@ -1906,8 +2176,20 @@ while True:
                             v.append([os.path.basename(str(i['target_path'])), Image.fromarray(cv2.cvtColor(i["first_frame"], cv2.COLOR_BGR2RGB))])
                         Scrolledlistbox1.insert_data(v)
                         root.update_idletasks()
-                        if len(videos) > 0:
+                        
+                        # Bounds checking for current_video access
+                        if len(videos) > 0 and current_video >= 0 and current_video < len(videos):
                             videos[current_video]['old_number'] = -1
+                            print(f"[UPDATE_SELECTOR:main] Reset old_number for current video {current_video}")
+                        
+                        # Ensure frame loading for current video after list changes
+                        if len(videos) > 0 and current_video >= 0 and current_video < len(videos):
+                            try:
+                                ensure_frame_loaded_and_update_preview()
+                                print(f"[UPDATE_SELECTOR:main] Frame loaded for current video {current_video}")
+                            except Exception as e:
+                                print(f"[UPDATE_SELECTOR:error] Failed to load frame: {e}")
+                        
                         frame_updater(False)
                     #sel = Scrolledlistbox1.curselection()
                     #if len(sel) != 0:
@@ -1917,7 +2199,13 @@ while True:
                     sel = Scrolledlistbox1.get_selected_id()
                     if sel == None:
                         sel = 0
-                    if sel != current_video:
+                        
+                    # Clamp selection to valid range
+                    if sel >= len(videos):
+                        sel = max(0, len(videos) - 1)
+                        print(f"[UPDATE_SELECTOR:main] Clamped selection to {sel}")
+                    
+                    if sel != current_video and len(videos) > 0 and sel >= 0 and sel < len(videos):
                         if videos[sel]['rendering'] == True:
                             render_button.config(state=tk.DISABLED)
                             stop_rendering_button.config(state=tk.ACTIVE)
@@ -1925,7 +2213,8 @@ while True:
                             render_button.config(state=tk.ACTIVE)
                             stop_rendering_button.config(state=tk.DISABLED)
                     current_video = sel
-                except:
+                except Exception as e:
+                    print(f"[UPDATE_SELECTOR:main] Error in update_selector: {e}")
                     pass
                 try:
                     if face_selector_var.get() == 1:

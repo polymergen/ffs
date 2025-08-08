@@ -305,8 +305,6 @@ def choose_faces_to_swap():
                     cv2.destroyWindow("Choose the face")
                     #print(f"got face {it}")
 
-
-
     def get_face_boxes(image):
         faces = sorted(face_analyzer.get(image), key=lambda x: x.bbox[0])
         bboxes = []
@@ -314,7 +312,7 @@ def choose_faces_to_swap():
             embedding = i.normed_embeddings
             i = i.bbox
             bboxes.append([int(i[0]),int(i[1]),int(i[2]),int(i[3]), embedding])
-        return bboxes
+        return bboxes    
     #show_error("sorry, but it's in development, I hope next version will implement it. For now use old method. Sorry")
     #return
     if che56.get() == 1:
@@ -324,11 +322,17 @@ def choose_faces_to_swap():
         try:
             video_type = mime.from_file(filex)
         except Exception as e:
-            print(f"{filex} is not image, error from video_type: {e}")
+            print(f"[FACE_SELECT:beta] {filex} is not image, error from video_type: {e}")
             return
         if not video_type.startswith('image'):
             return 
+        
+        print(f"[FACE_SELECT:beta] New source face selected: {filex}")
         globalsx.source_face = cv2.imread(filex)
+        
+        # Use the new invalidation function
+        invalidate_all_swapped_frames()
+        
         return
 
     height, width, channels = videos[globalsx.current_video]['current_frame_original'].shape
@@ -336,7 +340,7 @@ def choose_faces_to_swap():
         lowest = min(height, width)
         face_analyzer = prepare_models(custom_return=True, det_size=(128, 128))
     else:
-        face_analyzer = prepare_models(custom_return=True, det_size=(640, 640))
+        face_analyzer = prepare_models(custom_return=True, det_size=(256, 256))
     if not faces_to_swap_window or not faces_to_swap_window.winfo_exists():
         filex = askopenfilename(title="Select a face that you want to swap with")
         if not filex:
@@ -374,17 +378,39 @@ def current_swapping_thread():
     while True:
         time.sleep(0.01)
         try:
-            if len(globalsx.to_swap) > 0:
-                current_frame = videos[globalsx.current_video]['frame_position']
+            # Check if we have videos and a valid current video index
+            if len(videos) == 0 or globalsx.current_video >= len(videos) or globalsx.current_video < 0:
+                continue
+                
+            current_video_ref = videos[globalsx.current_video]
+            
+            if len(globalsx.to_swap) > 0 or hasattr(globalsx, 'source_face'):
+                current_frame = current_video_ref['frame_position']
                 current_frame += globalsx.frame_move
-                if current_frame >= videos[globalsx.current_video]['frame_amount']:
-                    current_frame = videos[globalsx.current_video]['frame_amount'] -1
+                if current_frame >= current_video_ref['frame_amount']:
+                    current_frame = current_video_ref['frame_amount'] -1
                 if current_frame < 0:
                     current_frame = 0
-                videos[globalsx.current_video]['frame_position'] = current_frame
-                videos[globalsx.current_video]['current_frame_swapped'] = swap_frame(videos[globalsx.current_video]['current_frame_original'])
+                current_video_ref['frame_position'] = current_frame
+                
+                # Check if current video needs reprocessing or if frame changed
+                needs_reprocess = current_video_ref.get('needs_reprocess', False)
+                frame_changed = current_video_ref.get('last_processed_frame') != current_frame
+                
+                if needs_reprocess or frame_changed or current_video_ref.get('current_frame_swapped') is None:
+                    print(f"[SWAP_THREAD:beta] Reprocessing frame {current_frame} for video {globalsx.current_video}")
+                    original_frame = current_video_ref.get('current_frame_original')
+                    if original_frame is not None:
+                        # Perform face swapping
+                        swapped_frame = swap_frame(original_frame)
+                        current_video_ref['current_frame_swapped'] = swapped_frame
+                        current_video_ref['needs_reprocess'] = False
+                        current_video_ref['last_processed_frame'] = current_frame
+                        print(f"[SWAP_THREAD:beta] Frame {current_frame} swapped successfully for video {globalsx.current_video}")
+                
         except Exception as e:
-            print(e)
+            print(f"[SWAP_THREAD:error] {e}")
+            # Continue running even if there's an error
 threading.Thread(target=current_swapping_thread).start()
 def select_target(batch=False):
     global args
@@ -446,9 +472,13 @@ def select_target(batch=False):
                     "length": length, #in seconds
                     "frame_amount": frame_amount,
                     "current_frame_original": current_frame,
-                    "current_frame_swapped": current_frame,
+                    "current_frame_swapped": current_frame,  # Initialize with original frame
                     "frame_position":0,
-                    "currently_processing": 0})
+                    "currently_processing": 0,
+                    "needs_reprocess": True,  # Mark for initial processing
+                    "last_processed_frame": -1})  # Track last processed frame
+        
+        print(f"[ADD_VIDEO:beta] Added video: {filename}, total videos: {len(videos)}")
     
 def add_target_videos():
     global add_target_videos_window
@@ -475,6 +505,66 @@ def add_target_videos():
     else:
         add_target_videos_window.lift()
         add_target_videos_window.focus()
+
+def delete_current_video():
+    """Safely delete the current video and update UI"""
+    global videos, globalsx
+    if len(videos) == 0:
+        print("[VIDEO_DELETE:beta] No videos to delete")
+        return False
+    
+    if globalsx.current_video < 0 or globalsx.current_video >= len(videos):
+        print("[VIDEO_DELETE:beta] Invalid current video index")
+        return False
+    
+    print(f"[VIDEO_DELETE:beta] Deleting video at index {globalsx.current_video}")
+    
+    # Remove the video
+    deleted_video = videos.pop(globalsx.current_video)
+    
+    # Clean up resources if needed
+    if 'cap' in deleted_video and hasattr(deleted_video['cap'], 'release'):
+        try:
+            deleted_video['cap'].release()
+        except:
+            pass
+    
+    # Adjust current video index
+    if len(videos) == 0:
+        globalsx.current_video = 0
+        print("[VIDEO_DELETE:beta] No videos remaining")
+    elif globalsx.current_video >= len(videos):
+        globalsx.current_video = len(videos) - 1
+        print(f"[VIDEO_DELETE:beta] Adjusted current video to {globalsx.current_video}")
+    
+    # Force UI update
+    force_ui_refresh()
+    return True
+
+def force_ui_refresh():
+    """Force immediate UI refresh and swapped frame invalidation"""
+    print("[UI_REFRESH:beta] Forcing UI refresh")
+    
+    # Invalidate current video's swapped frame if it exists
+    if len(videos) > 0 and globalsx.current_video < len(videos):
+        current_video = videos[globalsx.current_video]
+        if 'current_frame_original' in current_video:
+            # Reset swapped frame to force reprocessing
+            current_video['current_frame_swapped'] = current_video['current_frame_original'].copy()
+            current_video['needs_reprocess'] = True
+            current_video['last_processed_frame'] = -1
+            print(f"[UI_REFRESH:beta] Invalidated swapped frame for video {globalsx.current_video}")
+
+def invalidate_all_swapped_frames():
+    """Invalidate swapped frames for all videos (e.g., after face change)"""
+    print("[INVALIDATE:beta] Invalidating all swapped frames")
+    for i, video in enumerate(videos):
+        if 'current_frame_original' in video:
+            # Reset to original frame
+            video['current_frame_swapped'] = video['current_frame_original'].copy()
+            video['needs_reprocess'] = True  
+            video['last_processed_frame'] = -1
+            print(f"[INVALIDATE:beta] Marked video {i} for reprocessing")
 
 def additional_settings():
     global additional_settings_window
@@ -589,37 +679,93 @@ def update_current_frame():
         time.sleep(0.01)
 threading.Thread(target=update_current_frame).start()
 def update_gui(old_video_len=0, old_sel=0):
-    sel = Scrolledlistbox1.curselection()
-    if len(sel) != 0:
-        sel = sel[0]
-    else:
-        sel = 0
-    globalsx.current_video = sel
-    if len(videos) > 0:
-        width = Originalvideopreview.winfo_width() - 20
-        height = Originalvideopreview.winfo_height() - 10
-        image = ImageTk.PhotoImage(resize_image(videos[globalsx.current_video]['current_frame_original'], max_width=width, max_height=height))
-        Originalvideopreview_image.configure(image=image)
-        Originalvideopreview_image.image = image
-        width = Processedvideopreview.winfo_width() - 20
-        height = Processedvideopreview.winfo_height() - 10
-        image = ImageTk.PhotoImage(resize_image(videos[globalsx.current_video]['current_frame_swapped'], max_width=width, max_height=height))
-        Processedvideopreview_image.configure(image=image)
-        Processedvideopreview_image.image = image
-        top.update()
-        top.update_idletasks()
-    if old_video_len != len(videos):
-        Scrolledlistbox1.delete('0','end')
-        for i in videos:
-            Scrolledlistbox1.insert("end", i['filename'])
-    if old_sel != sel:
-        Label4.configure(text=f'Input filename: {videos[globalsx.current_video]["filename"]}')
-        Label5.configure(text=f'Output filename: {videos[globalsx.current_video]["filename_output"]}')
-        Label6.configure(text=f'FPS: {videos[globalsx.current_video]["fps"]}')
-        Label7.configure(text=f'Video length: {video_length_converter(videos[globalsx.current_video]["length"])}')
-        Label8.configure(text=f'Total frames: {videos[globalsx.current_video]["frame_amount"]}')
-    globalsx.enhancer_choice = enhancer_choice.get()
-    globalsx.alpha = float(Scale2.get())
+    try:
+        sel = Scrolledlistbox1.curselection()
+        if len(sel) != 0:
+            sel = sel[0]
+        else:
+            sel = 0
+        
+        # Safety check for video list bounds
+        if len(videos) == 0:
+            print("[UPDATE_GUI:beta] No videos available")
+            # Clear the displays
+            Originalvideopreview_image.configure(image=None)
+            Originalvideopreview_image.image = None
+            Processedvideopreview_image.configure(image=None)
+            Processedvideopreview_image.image = None
+            globalsx.current_video = 0
+            top.after(50, update_gui, len(videos), sel)
+            return
+            
+        # Clamp selection to valid range
+        if sel >= len(videos):
+            sel = len(videos) - 1
+            print(f"[UPDATE_GUI:beta] Clamped selection to {sel}")
+        
+        # Update current video index
+        old_current = globalsx.current_video
+        globalsx.current_video = sel
+        
+        # If video selection changed, invalidate swapped frame
+        if old_current != sel and len(videos) > sel:
+            print(f"[UPDATE_GUI:beta] Video selection changed from {old_current} to {sel}")
+            current_video = videos[sel]
+            # Force reprocessing of swapped frame for new video
+            if 'current_frame_original' in current_video:
+                current_video['current_frame_swapped'] = current_video['current_frame_original'].copy()
+                current_video['needs_reprocess'] = True
+                current_video['last_processed_frame'] = -1
+        
+        # Update image displays
+        if len(videos) > 0 and sel < len(videos):
+            current_video = videos[sel]
+            
+            # Update original preview
+            width = Originalvideopreview.winfo_width() - 20
+            height = Originalvideopreview.winfo_height() - 10
+            if 'current_frame_original' in current_video and current_video['current_frame_original'] is not None:
+                image = ImageTk.PhotoImage(resize_image(current_video['current_frame_original'], max_width=width, max_height=height))
+                Originalvideopreview_image.configure(image=image)
+                Originalvideopreview_image.image = image
+            
+            # Update swapped preview
+            width = Processedvideopreview.winfo_width() - 20
+            height = Processedvideopreview.winfo_height() - 10
+            if 'current_frame_swapped' in current_video and current_video['current_frame_swapped'] is not None:
+                image = ImageTk.PhotoImage(resize_image(current_video['current_frame_swapped'], max_width=width, max_height=height))
+                Processedvideopreview_image.configure(image=image)
+                Processedvideopreview_image.image = image
+            
+            top.update()
+            top.update_idletasks()
+            
+        # Update video list if it changed
+        if old_video_len != len(videos):
+            print(f"[UPDATE_GUI:beta] Video list changed from {old_video_len} to {len(videos)}")
+            Scrolledlistbox1.delete('0','end')
+            for i, video in enumerate(videos):
+                Scrolledlistbox1.insert("end", video.get('filename', f'Video {i}'))
+            
+            # Restore selection if valid
+            if sel < len(videos):
+                Scrolledlistbox1.selection_set(sel)
+                
+        # Update video info labels if selection changed  
+        if old_sel != sel and len(videos) > sel:
+            current_video = videos[sel]
+            Label4.configure(text=f'Input filename: {current_video.get("filename", "Unknown")}')
+            Label5.configure(text=f'Output filename: {current_video.get("filename_output", "Unknown")}')
+            Label6.configure(text=f'FPS: {current_video.get("fps", "N/A")}')
+            Label7.configure(text=f'Video length: {video_length_converter(current_video.get("length", 0))}')
+            Label8.configure(text=f'Total frames: {current_video.get("frame_amount", "N/A")}')
+            
+        globalsx.enhancer_choice = enhancer_choice.get()
+        globalsx.alpha = float(Scale2.get())
+        
+    except Exception as e:
+        print(f"[UPDATE_GUI:error] {e}")
+    
     top.after(50, update_gui, len(videos), sel)
 background_color = "#19122b"
 box_background_color = "#251b3f"
@@ -850,6 +996,11 @@ Button1.pack(side='top', fill='both', expand=True)
 Button1.configure(background=button_color, compound='left')
 Button1.configure(disabledforeground="#a3a3a3", foreground=text_color)
 
+ButtonDelete = tk.Button(Frame1, text='Delete current video', command=delete_current_video)
+ButtonDelete.pack(side='top', fill='both', expand=True)
+ButtonDelete.configure(background="#cf0404", compound='left')  # Red color for delete
+ButtonDelete.configure(disabledforeground="#a3a3a3", foreground=text_color)
+
 Button7 = tk.Button(Frame1, text='Additional settings', command=additional_settings)
 Button7.pack(side='top', fill='both', expand=True)
 Button7.configure(background=button_color, compound='left')
@@ -886,3 +1037,64 @@ top.after(100, update_gui)
 
 
 top.mainloop()
+
+# Add video deletion and management functions
+def delete_current_video():
+    """Safely delete the current video and update UI"""
+    global videos, globalsx
+    if len(videos) == 0:
+        print("[VIDEO_DELETE:beta] No videos to delete")
+        return False
+    
+    if globalsx.current_video < 0 or globalsx.current_video >= len(videos):
+        print("[VIDEO_DELETE:beta] Invalid current video index")
+        return False
+    
+    print(f"[VIDEO_DELETE:beta] Deleting video at index {globalsx.current_video}")
+    
+    # Remove the video
+    deleted_video = videos.pop(globalsx.current_video)
+    
+    # Clean up resources if needed
+    if 'cap' in deleted_video and hasattr(deleted_video['cap'], 'release'):
+        try:
+            deleted_video['cap'].release()
+        except:
+            pass
+    
+    # Adjust current video index
+    if len(videos) == 0:
+        globalsx.current_video = 0
+        print("[VIDEO_DELETE:beta] No videos remaining")
+    elif globalsx.current_video >= len(videos):
+        globalsx.current_video = len(videos) - 1
+        print(f"[VIDEO_DELETE:beta] Adjusted current video to {globalsx.current_video}")
+    
+    # Force UI update
+    force_ui_refresh()
+    return True
+
+def force_ui_refresh():
+    """Force immediate UI refresh and swapped frame invalidation"""
+    print("[UI_REFRESH:beta] Forcing UI refresh")
+    
+    # Invalidate current video's swapped frame if it exists
+    if len(videos) > 0 and globalsx.current_video < len(videos):
+        current_video = videos[globalsx.current_video]
+        if 'current_frame_original' in current_video:
+            # Reset swapped frame to force reprocessing
+            current_video['current_frame_swapped'] = current_video['current_frame_original'].copy()
+            current_video['needs_reprocess'] = True
+            current_video['last_processed_frame'] = -1
+            print(f"[UI_REFRESH:beta] Invalidated swapped frame for video {globalsx.current_video}")
+
+def invalidate_all_swapped_frames():
+    """Invalidate swapped frames for all videos (e.g., after face change)"""
+    print("[INVALIDATE:beta] Invalidating all swapped frames")
+    for i, video in enumerate(videos):
+        if 'current_frame_original' in video:
+            # Reset to original frame
+            video['current_frame_swapped'] = video['current_frame_original'].copy()
+            video['needs_reprocess'] = True  
+            video['last_processed_frame'] = -1
+            print(f"[INVALIDATE:beta] Marked video {i} for reprocessing")
