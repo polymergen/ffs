@@ -80,6 +80,10 @@ if not args['fastload']:
 globalsz.lowmem = args['lowmem']
 from utils import *
 videos = []
+models_ready = threading.Event()
+gui_models_preloaded = False
+face_swappers = None
+face_analysers = None
 current_video = 0 #id of video
 target_embedding = None
 clip_neg_prompt = ""
@@ -147,6 +151,19 @@ def get_source_face():
         #        show_error_custom(text = f"HUSTON, WE HAVE A PROBLEM. WE CAN'T DETECT THE FACE IN THE IMAGE YOU PROVIDED! ERROR: {e}")
         #        kill_ui()
     return videos[current_video]['face'] #globalsz.source_face
+
+def get_primary_face_from_image_path(face_path):
+    global face_analysers
+    if face_analysers is None or len(face_analysers) == 0:
+        raise RuntimeError("Face models are not loaded yet. Wait a few seconds and try again.")
+    img = imread_bgr_with_exif(face_path)
+    if img is None:
+        raise ValueError(f"Could not read face image (missing file or unsupported format): {face_path}")
+    faces = get_faces_adaptive_det_size(face_analysers[0], img)
+    if not faces:
+        raise ValueError("No face detected in the selected face image. Use Select face to choose a clearer frontal photo.")
+    return sorted(faces, key=lambda x: x.bbox[0])[0]
+
 def start_swapper(sw):
     import pickle
     with open('ll.pkl', 'rb') as file:
@@ -154,7 +171,11 @@ def start_swapper(sw):
     frame = face_swappers[sw].get(cv2.imread(args['face']), loaded_data, loaded_data, paste_back=True)
     return frame
 def start_analyser(sw):
-    x = sorted(face_analysers[sw].get(cv2.imread(args['face'])), key=lambda x: x.bbox[0])[0]
+    img = imread_bgr_with_exif(args['face'])
+    faces = get_faces_adaptive_det_size(face_analysers[sw], img)
+    if not faces:
+        raise ValueError("No face detected in face image during model warm-up.")
+    x = sorted(faces, key=lambda x: x.bbox[0])[0]
     return x
 def startx():
     global face_swappers, face_analysers
@@ -1111,11 +1132,20 @@ while True:
         right_control_frame.grid(row=0, column=0, rowspan=2, sticky="ns")
         def add():
             global videos
+            if not models_ready.is_set():
+                show_error_custom(text="Models are still loading. Please wait a few seconds and try again.")
+                return
             try:
-                facex = sorted(face_analysers[0].get(cv2.imread(args["face"])), key=lambda x: x.bbox[0])[0]
-                videos.append(create_new_cap(args['target_path'], facex, args['output'],))
+                facex = get_primary_face_from_image_path(args["face"])
+                cap_entry = create_new_cap(args['target_path'], facex, args['output'],)
+                if cap_entry is None:
+                    show_error_custom(text="Could not open the target file or unsupported type. Check Select target.")
+                    return
+                videos.append(cap_entry)
+            except (ValueError, RuntimeError) as e:
+                show_error_custom(text=str(e))
             except Exception as e:
-                show_error_custom(text=f"Wait few seconds and try again, program didn't start yet (I will not notify you). debug error: {e}")
+                show_error_custom(text=f"Could not add video: {e}")
         def delete_current_video():
             global videos, current_video
             videos.pop(current_video)
@@ -1565,9 +1595,9 @@ while True:
         button_start_program.grid(row=10, column=0, pady=3, sticky='ew')
 
     def main():
-        global current_video, videos,old_index, args, width, height, frame_index, face_analysers,frame_move, face_swappers, source_face, progress_var, target_embedding, count, frame_number, listik, frame, cap,current_loop_video
+        global current_video, videos,old_index, args, width, height, frame_index, face_analysers,frame_move, face_swappers, source_face, progress_var, target_embedding, count, frame_number, listik, frame, cap,current_loop_video, gui_models_preloaded
         #start = time.time()
-        if not args['fastload']:
+        if not args['fastload'] and not gui_models_preloaded:
             face_swappers, face_analysers = prepare_swappers_and_analysers(args)
         #optimize_saver()
         #if args['fastload']:
@@ -1622,14 +1652,22 @@ while True:
                 #im = cv2.resize(im, (640, 640))
                 target_embedding = get_embedding(im)[0]
         if args['cli']:
-            facex = sorted(face_analysers[0].get(cv2.imread(args["face"])), key=lambda x: x.bbox[0])[0]
+            facex = get_primary_face_from_image_path(args["face"])
             if args['batch'] == '':
-                videos.append(create_new_cap(args['target_path'], facex, args['output'],batch_post=""))
+                cap_entry = create_new_cap(args['target_path'], facex, args['output'],batch_post="")
+                if cap_entry is None:
+                    print("Could not open target or unsupported file type; exiting.")
+                    os._exit(1)
+                videos.append(cap_entry)
             else:
                 if args['grim']:
                     pbar = tqdm(total=len(os.listdir(args['target_path'])), desc="we are in grim mode, please just wait a bit")
                 for file in os.listdir(args['target_path']):
-                    videos.append(create_new_cap(os.path.join(args['target_path'], file), facex, os.path.join(args['output'], file),batch_post=args['batch'], grim=args['grim']))
+                    cap_entry = create_new_cap(os.path.join(args['target_path'], file), facex, os.path.join(args['output'], file),batch_post=args['batch'], grim=args['grim'])
+                    if cap_entry is None:
+                        print(f"Skipping unsupported or unreadable file: {file}")
+                        continue
+                    videos.append(cap_entry)
                     if args['grim']:
                         pbar.update(1)
         #videos[current_video]['rendering'] = int(args['cli'])
@@ -1873,6 +1911,10 @@ while True:
     try:
         if not args['cli']:
             listik = [0, 1, 0, 0, 0]
+            if not args['fastload']:
+                face_swappers, face_analysers = prepare_swappers_and_analysers(args)
+                gui_models_preloaded = True
+            models_ready.set()
             threading.Thread(target=main).start()
             def update_gui(old_index=0):
                 global frame_index
@@ -1952,7 +1994,7 @@ while True:
             globalsz.source_face = None
             try:
                 root.destroy()
-            except:
-                continue
-            continue
-        os._exit(0)
+            except Exception:
+                pass
+        else:
+            os._exit(0)

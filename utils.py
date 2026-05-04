@@ -36,7 +36,7 @@ import numpy as np
 import time
 if not globalsz.args['cli']:
     from tkinter import messagebox
-from PIL import Image
+from PIL import Image, ImageOps
 import os
 import psutil
 NoneType = type(None)
@@ -975,6 +975,170 @@ def remove_background(frame,args, ct=0, magic = True):
         output_frame[:, :, 3] = alpha_channel
     #print(output_frame.shape)
     return output_frame
+
+# Source-image face detection: try multiple SCRFD input sizes (prepare det_size) up to image bounds.
+_SOURCE_FACE_DET_MIN = 256
+_SOURCE_FACE_DET_MAX_CAP = 1280
+_SOURCE_FACE_DET_STEP = 32
+_DEFAULT_DET_SIZE = (640, 640)
+_DEFAULT_DET_THRESH = 0.5
+# Default SCRFD thresh is 0.5; lower values recover low-contrast / profile / partial faces (more false positives).
+_SOURCE_FACE_DET_THRESHOLDS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15)
+# Fraction of width/height added on each side (symmetric). Shrinks how much of the tensor the face fills.
+_SOURCE_FACE_PAD_FRACS = (0.0, 0.12, 0.22, 0.35, 0.5)
+
+
+def imread_bgr_with_exif(path):
+    """
+    BGR image for OpenCV / InsightFace. Applies EXIF orientation (viewers do; cv2.imread does not),
+    which often fixes 'no face' on upright-looking phone photos stored sideways in the file.
+    """
+    try:
+        pil = Image.open(path)
+        pil = ImageOps.exif_transpose(pil)
+        if pil.mode == "RGBA":
+            pil = pil.convert("RGB")
+        elif pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        rgb = np.array(pil)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return cv2.imread(path)
+
+
+def iter_source_face_det_sizes(img_height, img_width):
+    """Descending list of square det sizes from min(max_dim, cap) down to min, aligned to 32."""
+    max_dim = max(int(img_height), int(img_width))
+    cap = min(max(max_dim, _SOURCE_FACE_DET_MIN), _SOURCE_FACE_DET_MAX_CAP)
+    cap = (cap // 32) * 32
+    sizes = list(range(_SOURCE_FACE_DET_MIN, cap + 1, _SOURCE_FACE_DET_STEP))
+    if cap not in sizes:
+        sizes.append(cap)
+    return sorted(set(sizes), reverse=True)
+
+
+def _prepare_face_detector(analyser, ctx_id, det_thresh, det_size_hw):
+    """InsightFace versions differ slightly; always pass det_thresh when supported."""
+    try:
+        analyser.prepare(ctx_id, det_thresh=det_thresh, det_size=det_size_hw)
+    except TypeError:
+        analyser.prepare(ctx_id, det_size=det_size_hw)
+
+
+def _symmetric_pad_for_detection(img, pad_frac):
+    """
+    Add margin around the image so a very large face occupies less of the detector input
+    (letterboxing in content space). pad_frac is per-side as a fraction of W and H
+    (e.g. 0.2 adds ~20% of width on left and right each).
+    Returns (padded_bgr, pad_w, pad_h) where pad_w/pad_h are the left/top border widths.
+    """
+    if pad_frac is None or pad_frac <= 0:
+        return img, 0, 0
+    h, w = img.shape[:2]
+    pw = int(round(w * float(pad_frac)))
+    ph = int(round(h * float(pad_frac)))
+    if pw < 1 and ph < 1:
+        return img, 0, 0
+    out = cv2.copyMakeBorder(
+        img, ph, ph, pw, pw, cv2.BORDER_CONSTANT, value=(0, 0, 0)
+    )
+    return out, pw, ph
+
+
+def _resize_to_max_long_side(img, max_long_side):
+    """
+    Uniformly scale so max(width, height) <= max_long_side (helps SCRFD when the face
+    is huge in pixel space relative to det_size). Returns (work_bgr, scale_x, scale_y)
+    mapping work coordinates -> original image coordinates.
+    """
+    h, w = img.shape[:2]
+    m = max(h, w)
+    if m <= max_long_side:
+        return img, 1.0, 1.0
+    s = max_long_side / float(m)
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    work = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    sx = w / float(nw)
+    sy = h / float(nh)
+    return work, sx, sy
+
+
+def _iter_pyramid_long_sides(max_dim):
+    """
+    Long-side targets to try, smallest first when the source is large: downscaled
+    detection first (large-in-frame faces), then progressively larger up to full res
+    (small / distant faces).
+    """
+    if max_dim <= 720:
+        return [max_dim]
+    rungs = [640, 720, 800, 896, 960, 1024, 1152, 1280]
+    caps = [c for c in rungs if c < max_dim]
+    caps.append(max_dim)
+    return sorted(set(caps))
+
+
+def _map_face_from_work_to_source(face, sx, sy, pad_w, pad_h):
+    """Map bbox / landmarks from detector work image back to unpadded source coordinates."""
+    bb = np.asarray(face.bbox, dtype=np.float64)
+    face.bbox = np.array(
+        [
+            bb[0] * sx - pad_w,
+            bb[1] * sy - pad_h,
+            bb[2] * sx - pad_w,
+            bb[3] * sy - pad_h,
+        ],
+        dtype=np.float32,
+    )
+    kps = getattr(face, "kps", None)
+    if kps is not None:
+        k = np.asarray(kps, dtype=np.float64).copy()
+        k[:, 0] = k[:, 0] * sx - pad_w
+        k[:, 1] = k[:, 1] * sy - pad_h
+        face.kps = k.astype(np.float32)
+
+
+def _det_thresh_and_size_sweep(analyser, work, ctx_id):
+    """Single-resolution sweep (no restore)."""
+    h, w = work.shape[:2]
+    if h < 1 or w < 1:
+        return []
+    det_sizes = iter_source_face_det_sizes(h, w)
+    for det_thresh in _SOURCE_FACE_DET_THRESHOLDS:
+        for det in det_sizes:
+            _prepare_face_detector(analyser, ctx_id, det_thresh, (det, det))
+            faces = analyser.get(work)
+            if faces:
+                return faces
+    return []
+
+
+def get_faces_adaptive_det_size(analyser, img, ctx_id=0):
+    """
+    Optionally pad (margin) so huge in-frame faces shrink vs the canvas, then resize
+    to a pyramid of long-side caps, run det_thresh x det_size sweeps, map boxes back
+    to original (unpadded) coordinates. Restores default det_size / det_thresh after.
+    """
+    if img is None or not hasattr(img, "shape") or len(img.shape) < 2:
+        return []
+    ho, wo = img.shape[:2]
+    if ho < 1 or wo < 1:
+        return []
+    try:
+        for pad_frac in _SOURCE_FACE_PAD_FRACS:
+            img_p, pad_w, pad_h = _symmetric_pad_for_detection(img, pad_frac)
+            mo = max(img_p.shape[0], img_p.shape[1])
+            for cap in _iter_pyramid_long_sides(mo):
+                work, sx, sy = _resize_to_max_long_side(img_p, cap)
+                faces = _det_thresh_and_size_sweep(analyser, work, ctx_id)
+                if faces:
+                    for f in faces:
+                        _map_face_from_work_to_source(f, sx, sy, pad_w, pad_h)
+                    return faces
+        return []
+    finally:
+        _prepare_face_detector(analyser, ctx_id, _DEFAULT_DET_THRESH, _DEFAULT_DET_SIZE)
+
 
 def prepare_swappers_and_analysers(args):
     global get_model
