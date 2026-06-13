@@ -36,7 +36,7 @@ import numpy as np
 import time
 if not globalsz.args['cli']:
     from tkinter import messagebox
-from PIL import Image
+from PIL import Image, ImageOps
 import os
 import psutil
 NoneType = type(None)
@@ -44,8 +44,10 @@ import sys
 #if not globalsz.args['nocuda']:
 #    torch.backends.cudnn.benchmark = True
 import tqdm
-
+import magic    #pip install python-magic-bin https://github.com/Yelp/elastalert/issues/1927
+mime = magic.Magic(mime=True)
 if not globalsz.args['fastload']:
+    import mediapipe as mp
     from basicsr.archs.rrdbnet_arch import RRDBNet
     from basicsr.utils.download_util import load_file_from_url
     from realesrgan import RealESRGANer
@@ -56,6 +58,8 @@ if not globalsz.args['fastload']:
     from scipy.spatial import distance
     import queue
     import torch
+    from rembg import remove as remove_bg
+    from rembg import new_session
 if not globalsz.lowmem:
     import tensorflow as tf
     physical_devices = tf.config.list_physical_devices('GPU')
@@ -70,7 +74,154 @@ if globalsz.args['experimental']:
     except ImportError:
         print("In the experimental mode, you have to pip install imutils")
         exit()
+import numpy as np
+
+def calculate_rotation_angles(image):
+    angles = []  # Initialize an empty list to store angles for each face
+    
+    with globalsz.advanced_face_detector_lock:
+        results = globalsz.face_mesh.process(image)  # cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+    if results.multi_face_landmarks:
+        h, w, c = image.shape
+        for face_landmarks in results.multi_face_landmarks:  # Iterate over each face
+            landmarks = face_landmarks.landmark
+            
+            # Identify specific landmarks for angle calculation
+            bottom_middle_landmark = (int(landmarks[175].x * w), int(landmarks[175].y * h))
+            landmark_151 = (int(landmarks[151].x * w), int(landmarks[151].y * h))
+
+            # Calculate the rotation angle for this face
+            angle = np.arctan2(
+                bottom_middle_landmark[0] - landmark_151[0],
+                landmark_151[1] - bottom_middle_landmark[1]
+            ) * 180 / np.pi
+
+            # Append the angle to the list
+            angles.append(angle + 180)
         
+        return angles  # Return the list of angles
+    
+    return [0]  # Return [0] if no faces are detected
+
+# Function to rotate an image
+def rotate_image(image, angle):
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    rotation_matrix = cv2.getRotationMatrix2D(center, -angle, 1.0)
+    
+    # Calculate new dimensions after rotation
+    cos_angle = np.abs(rotation_matrix[0, 0])
+    sin_angle = np.abs(rotation_matrix[0, 1])
+    new_w = int(w * cos_angle + h * sin_angle)
+    new_h = int(w * sin_angle + h * cos_angle)
+    
+    # Adjust the translation part of the rotation matrix
+    rotation_matrix[0, 2] += (new_w - w) / 2
+    rotation_matrix[1, 2] += (new_h - h) / 2
+    
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (new_w, new_h))
+    return rotated_image, rotation_matrix
+
+# Function to rotate an image back to its original orientation
+def rotate_back(image, rotation_matrix, original_shape):
+    h, w = original_shape[:2]
+    rotated_back = cv2.warpAffine(image, rotation_matrix, (w, h), flags=cv2.WARP_INVERSE_MAP)
+    return rotated_back
+def get_face_details(image, adjustment_pixels):
+    # Initialize empty lists for bounding boxes and rotation angles
+    adjusted_bboxes = []
+    rotation_angles = []
+    
+    with globalsz.advanced_face_detector_lock:
+        results = globalsz.face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+    if results.multi_face_landmarks:
+        h, w, c = image.shape
+
+        for face_landmarks in results.multi_face_landmarks:
+            # Bounding box calculation
+            min_x, min_y, max_x, max_y = w, h, 0, 0
+            for landmark in face_landmarks.landmark:
+                x, y = int(landmark.x * w), int(landmark.y * h)
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+
+            # Adjust the bounding box
+            min_x -= adjustment_pixels
+            min_y -= adjustment_pixels
+            max_x += adjustment_pixels
+            max_y += adjustment_pixels
+
+            # Ensure the adjusted bounding box stays within image boundaries
+            min_x = max(min_x, 0)
+            min_y = max(min_y, 0)
+            max_x = min(max_x, w)
+            max_y = min(max_y, h)
+
+            adjusted_bboxes.append((min_x, min_y, max_x, max_y))
+
+            # Rotation angle calculation
+            landmarks = face_landmarks.landmark
+            bottom_middle_landmark = (int(landmarks[175].x * w), int(landmarks[175].y * h))
+            landmark_151 = (int(landmarks[151].x * w), int(landmarks[151].y * h))
+
+            angle = np.arctan2(
+                bottom_middle_landmark[0] - landmark_151[0],
+                landmark_151[1] - bottom_middle_landmark[1]
+            ) * 180 / np.pi
+
+            rotation_angles.append(angle + 180)
+
+    return adjusted_bboxes, rotation_angles
+
+
+def get_face_bboxes(image, adjustment_pixels):
+    with globalsz.advanced_face_detector_lock:
+        results = globalsz.face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+    adjusted_bboxes = []
+
+    if results.multi_face_landmarks:
+        h, w, c = image.shape
+
+        for face_landmarks in results.multi_face_landmarks:
+            min_x, min_y, max_x, max_y = w, h, 0, 0
+
+            for landmark in face_landmarks.landmark:
+                x, y = int(landmark.x * w), int(landmark.y * h)
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+
+            # Adjust the bounding box by adding N pixels to each side
+            min_x -= adjustment_pixels
+            min_y -= adjustment_pixels
+            max_x += adjustment_pixels
+            max_y += adjustment_pixels
+
+            # Ensure the adjusted bounding box stays within image boundaries
+            min_x = max(min_x, 0)
+            min_y = max(min_y, 0)
+            max_x = min(max_x, w)
+            max_y = min(max_y, h)
+
+            adjusted_bboxes.append((min_x, min_y, max_x, max_y))
+
+    return adjusted_bboxes
+def init_advanced_face_detector():
+    global mp
+    if globalsz.args['fastload']:
+        import mediapipe as mp
+    if isinstance(globalsz.mp_face_mesh, NoneType):
+        globalsz.mp_face_mesh = mp.solutions.face_mesh
+    if isinstance(globalsz.face_mesh, NoneType):
+        globalsz.face_mesh = globalsz.mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    
+
 def restart_program():
     """Restarts the current program."""
     python = sys.executable
@@ -102,18 +253,19 @@ def extract_frames_from_video(target_video, output_folder):
     ]
     subprocess.run(ffmpeg_cmd, check=True)
 def add_audio_from_video(video_path, audio_video_path, output_path):
+    print(video_path)
     ffmpeg_cmd = [
         'ffmpeg',
         "-an",
-        '-i', video_path,
-        '-i', audio_video_path,
+        '-i', f'"{video_path}"',
+        '-i', f'"{audio_video_path}"',
         #'-c:v', 'copy',    # Copy video codec settings
         #'-c', 'copy',    # Copy audio codec settings
         '-map', '1:a:0?',
         '-map', '0:v:0',
         #'-acodec', 'copy',
         #'-shortest',
-        output_path
+        f'"{output_path}"'
     ]
     subprocess.run(ffmpeg_cmd, check=True)
 def merge_face(temp_frame, original, alpha):
@@ -201,12 +353,19 @@ def add_audio_from_video(video_path, audio_video_path, output_path):
         output_path
     ]
     subprocess.run(ffmpeg_cmd, check=True)
-def get_nth_frame(cap, number):
-    cap.set(cv2.CAP_PROP_POS_FRAMES, number)
+def get_nth_frame(cap, number, type=0):
+    #type 0 video
+    #type 1 camera
+    #type 2 image
+    if type == 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, number)
     ret, frame = cap.read()
     if ret:
         return frame
     return None
+def reset_cap(cap):
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    return cap
 class ThreadWithReturnValue(Thread):
     def __init__(self, group=None, target=None, name=None,
                 args=(), kwargs={}, Verbose=None):
@@ -287,7 +446,7 @@ class VideoCaptureThread:
             return frame
 
 
-def prepare_models(args):
+'''def prepare_models(args):
     providers = rt.get_available_providers()
     sess_options = rt.SessionOptions()
     sess_options.intra_op_num_threads = 8
@@ -307,7 +466,7 @@ def prepare_models(args):
     #face_analyser.models.pop("landmark_3d_68")
     #face_analyser.models.pop("landmark_2d_106")
     #face_analyser.models.pop("genderage")
-    return face_swapper, face_analyser
+    return face_swapper, face_analyser'''
 
 def upscale_image(image, generator ):
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -538,6 +697,163 @@ def create_batch_cap(file):
     out = cv2.VideoWriter(name, fourcc, fps, (width, height))
     frame_number = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     return [cap, fps, width, height, out, name, file, frame_number]
+def is_integer(s):
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+def create_new_cap(file, face_, output_,batch_post="", grim=False):
+    if not isinstance(file, int):
+        if not is_integer(file):
+            try:
+                video_type = mime.from_file(file)
+            except Exception as e:
+                print(f"{file} is not image or video, error from video_type: {e}")
+                return
+        else:
+            video_type = 'video'
+            file = int(file)
+    else:
+        video_type = 'video'
+    if video_type.startswith('video') or 'inode' in video_type:
+        if batch_post != "":
+            if not batch_post.endswith(".mp4"):
+                batch_post += ".mp4"
+        if globalsz.args['camera_fix'] == True:
+            cap = cv2.VideoCapture(file, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(file)
+        if isinstance(file, int):
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, globalsz.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, globalsz.height)
+        fourcc = cv2.VideoWriter_fourcc(*'H265')
+        cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+        # Get the video's properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        output_filename = os.path.basename(output_)
+        name = os.path.join(output_.rstrip(output_filename).rstrip(), f"{output_filename}{batch_post}")
+        name_temp = os.path.join(output_.rstrip(output_filename).rstrip(), f"{output_filename}{batch_post}_temp.mp4")#f"{args['output']}_temp{args['batch']}.mp4"
+        out = cv2.VideoWriter(name_temp, fourcc, fps, (width, height))
+        frame_number = 1
+        if not isinstance(file, int):
+            frame_number = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        #face_ = 
+        return {"type": 1,
+                "cap":cap,
+                "original_image":None,
+                "swapped_image":None,
+                "target_path":file,
+                "save_path":name,
+                "save_temp_path":name_temp,
+                "current_frame_index":isinstance(file, int),
+                "old_number":-1,
+                "frame_number":frame_number,
+                "rendering":globalsz.args['cli'],
+                "width":width,
+                "height":height,
+                "fps":fps,
+                "faces_to_swap":None,
+                "settings":{
+                    "threads":None,
+                    "enable_swapper": not globalsz.args['no_faceswap'],
+                    "enable_enhancer": False,
+                    "enhancer_choice": "none",
+                    "bbox_adjust": [50, 50, 50, 50],
+                    "codeformer_fidelity":0.1,
+                    "blender":1.0,
+                    "codeformer_skip_if_no_face": False,
+                    "codeformer_upscale_face": True,
+                    "codeformer_enhancer_background": False,
+                    "codeformer_upscale_amount":1,
+                    },
+                "out_settings_for_resetting":{
+                    "name_temp":name_temp,
+                    "fourcc":fourcc,
+                    "fps":fps,
+                    "width":width,
+                    "height":height,
+                },
+                "out":out,
+                "count":-1,
+                "first_frame":get_nth_frame(cap, 0),
+                "temp": [],
+                "face":face_
+                }
+    if video_type.startswith('image'):
+        if batch_post != "":
+            if not batch_post.endswith(".png"):
+                batch_post += ".png"
+        output_filename = os.path.basename(output_)
+        name = os.path.join(output_.rstrip(output_filename).rstrip(), f"{output_filename}{batch_post}")
+        
+        if grim:
+            image = None
+            width, height = 0, 0
+        else:
+            image = cv2.imread(file)
+            width, height = image.shape[:2]
+        return {"type": 0,
+                "cap": None,
+                "original_image":image,
+                "swapped_image":None,
+                "target_path":file,
+                "save_path":name,
+                "save_temp_path":None,
+                "current_frame_index":0,
+                "old_number":-1,
+                "frame_number":-1,
+                "rendering":globalsz.args['cli'],
+                "width":width,
+                "height":height,
+                "fps":-1,
+                "faces_to_swap":None,
+                "settings":{
+                    "threads":None,
+                    "enable_swapper": not globalsz.args['no_faceswap'],
+                    "enable_enhancer": False,
+                    "enhancer_choice": "none",
+                    "bbox_adjust": [50, 50, 50, 50],
+                    "codeformer_fidelity":0.1,
+                    "blender":1.0,
+                    "codeformer_skip_if_no_face": False,
+                    "codeformer_upscale_face": True,
+                    "codeformer_enhancer_background": False,
+                    "codeformer_upscale_amount":1,
+                    },
+                "out_settings_for_resetting":None,
+                "out":None,
+                "count":-1,
+                "first_frame":image,#get_nth_frame(cap, 0),
+                "temp": [],
+                "face":face_,
+                "grim":grim}
+    print(video_type)
+def write_frame(video):
+    if video["type"] == 0:
+        print(video['save_path'])
+        cv2.imwrite(video['save_path'], video['swapped_image'])
+        return
+    video['out'].write(video["swapped_image"][:,:, :3])
+    return
+
+def get_frame(video, frame_index=-1, toret=False):
+    #if index == -1, just get the frame
+    if video['type'] == 0:
+        if toret:
+            return True, cv2.imread(video['target_path']) if video['grim'] == True else video["original_image"]
+        return cv2.imread(video['target_path']) if video['grim'] == True else video["original_image"]
+    if frame_index != -1:
+        return get_nth_frame(video['cap'], frame_index)
+    ret, frame = video['cap'].read()
+    if ret:
+        if toret:
+            return ret, frame
+        return frame
+    return ret, None
 
 def get_gpu_amount():
     num_devices = -1
@@ -573,6 +889,36 @@ def create_configs_for_onnx():
         'tunable_op_tuning_enable': 1
         }),'CPUExecutionProvider'
         ]
+        listx.append([idx, providers])
+    return listx
+def create_configs_for_onnx_rembg():
+    listx = []
+    gpu_amount = get_gpu_amount()
+    if gpu_amount == -1 and not globalsz.args['apple']:
+        return [('CPUExecutionProvider',),]
+    elif globalsz.args['apple']:
+        return [('CoreMLExecutionProvider',),]
+    gpu_list = list(range(gpu_amount))
+    if not globalsz.select_rembg_gpu == None:
+        gpu_list = globalsz.select_rembg_gpu
+    for idx in gpu_list:
+        providers = [('CUDAExecutionProvider', {
+            'device_id': idx,
+        #'gpu_mem_limit': 12 * 1024 * 1024 * 1024,
+        #'gpu_external_alloc': 0,
+        #'gpu_external_free': 0,
+        #'gpu_external_empty_cache': 1,
+        #'cudnn_conv_algo_search': 'EXHAUSTIVE',
+        #'cudnn_conv1d_pad_to_nc1d': 1,
+        #'arena_extend_strategy': 'kNextPowerOfTwo',
+        #'do_copy_in_default_stream': 1,
+        #'enable_cuda_graph': 0,
+        #'cudnn_conv_use_max_workspace': 1,
+        #'tunable_op_enable': 1,
+        #'enable_skip_layer_norm_strict_mode': 1,
+        #'tunable_op_tuning_enable': 1
+        }),'CPUExecutionProvider'
+        ]
         listx.append(providers)
     return listx
 
@@ -584,6 +930,257 @@ def get_sess_options():
     sess_options.execution_order = rt.ExecutionOrder.PRIORITY_BASED
     return sess_options
 
+def prepare_rembg(args):
+    global remove_bg, new_session
+    if isinstance(globalsz.rembg_models, NoneType):
+        if args['fastload']:
+            from rembg import remove as remove_bg
+            from rembg import new_session
+        provider_list = create_configs_for_onnx_rembg()
+        #sess_options = get_sess_options()
+        globalsz.rembg_models = []
+        #for idx, providers in enumerate(provider_list):
+        globalsz.rembg_models.append(new_session(globalsz.rembg_model))#, providers=providers))
+    #return rembg_models
+    
+def remove_background(frame,args, ct=0, magic = True):
+    global remove_bg
+    ct = 0
+    with globalsz.rembg_lock:
+        prepare_rembg(args)
+    # Convert frame to PNG bytes
+    _, buffer = cv2.imencode('.png', frame)
+    frame_bytes = buffer.tobytes()
+
+    # Remove background
+    output_bytes = remove_bg(frame_bytes, session=globalsz.rembg_models[ct], post_process_mask=True, bgcolor=globalsz.rembg_color)  # Make the background fully transparent for now
+
+    # Convert bytes back to a NumPy array
+    nparr = np.frombuffer(output_bytes, np.uint8)
+    output_frame = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+    if magic:
+        # Get the alpha channel
+        alpha_channel = output_frame[:, :, 3]
+
+        # Step 1: Dilate and Erode
+        kernel = np.ones((5,5), np.uint8)
+        alpha_channel = cv2.dilate(alpha_channel, kernel, iterations=1)
+        alpha_channel = cv2.erode(alpha_channel, kernel, iterations=1)
+
+        # Step 2: Blur and Threshold
+        alpha_channel = cv2.GaussianBlur(alpha_channel, (5, 5), 0)
+        _, alpha_channel = cv2.threshold(alpha_channel, 127, 255, cv2.THRESH_BINARY)
+
+        # Replace the alpha channel in the output frame
+        output_frame[:, :, 3] = alpha_channel
+    #print(output_frame.shape)
+    return output_frame
+
+# Source-image face detection: try multiple SCRFD input sizes (prepare det_size) up to image bounds.
+_SOURCE_FACE_DET_MIN = 256
+_SOURCE_FACE_DET_MAX_CAP = 1280
+_SOURCE_FACE_DET_STEP = 32
+_DEFAULT_DET_SIZE = (640, 640)
+_DEFAULT_DET_THRESH = 0.5
+# Default SCRFD thresh is 0.5; lower values recover low-contrast / profile / partial faces (more false positives).
+_SOURCE_FACE_DET_THRESHOLDS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15)
+# Fraction of width/height added on each side (symmetric). Shrinks how much of the tensor the face fills.
+_SOURCE_FACE_PAD_FRACS = (0.0, 0.12, 0.22, 0.35, 0.5)
+
+
+def is_file_readable_as_image(path):
+    """True if Pillow can decode pixels (works for unusual extensions)."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
+
+
+def list_image_files_in_folder(folder_path):
+    """Sorted full paths to regular files that decode as images."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    out = []
+    try:
+        for name in sorted(os.listdir(folder_path)):
+            p = os.path.join(folder_path, name)
+            if os.path.isfile(p) and is_file_readable_as_image(p):
+                out.append(p)
+    except OSError:
+        return []
+    return out
+
+
+def face_gallery_thumbnail(path, max_side=112):
+    """RGB PIL thumbnail for UI; None if unreadable."""
+    try:
+        pil = Image.open(path)
+        pil = ImageOps.exif_transpose(pil)
+        if pil.mode == "RGBA":
+            pil = pil.convert("RGB")
+        elif pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        pil.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        return pil
+    except Exception:
+        return None
+
+
+def imread_bgr_with_exif(path):
+    """
+    BGR image for OpenCV / InsightFace. Applies EXIF orientation (viewers do; cv2.imread does not),
+    which often fixes 'no face' on upright-looking phone photos stored sideways in the file.
+    """
+    try:
+        pil = Image.open(path)
+        pil = ImageOps.exif_transpose(pil)
+        if pil.mode == "RGBA":
+            pil = pil.convert("RGB")
+        elif pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        rgb = np.array(pil)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return cv2.imread(path)
+
+
+def iter_source_face_det_sizes(img_height, img_width):
+    """Descending list of square det sizes from min(max_dim, cap) down to min, aligned to 32."""
+    max_dim = max(int(img_height), int(img_width))
+    cap = min(max(max_dim, _SOURCE_FACE_DET_MIN), _SOURCE_FACE_DET_MAX_CAP)
+    cap = (cap // 32) * 32
+    sizes = list(range(_SOURCE_FACE_DET_MIN, cap + 1, _SOURCE_FACE_DET_STEP))
+    if cap not in sizes:
+        sizes.append(cap)
+    return sorted(set(sizes), reverse=True)
+
+
+def _prepare_face_detector(analyser, ctx_id, det_thresh, det_size_hw):
+    """InsightFace versions differ slightly; always pass det_thresh when supported."""
+    try:
+        analyser.prepare(ctx_id, det_thresh=det_thresh, det_size=det_size_hw)
+    except TypeError:
+        analyser.prepare(ctx_id, det_size=det_size_hw)
+
+
+def _symmetric_pad_for_detection(img, pad_frac):
+    """
+    Add margin around the image so a very large face occupies less of the detector input
+    (letterboxing in content space). pad_frac is per-side as a fraction of W and H
+    (e.g. 0.2 adds ~20% of width on left and right each).
+    Returns (padded_bgr, pad_w, pad_h) where pad_w/pad_h are the left/top border widths.
+    """
+    if pad_frac is None or pad_frac <= 0:
+        return img, 0, 0
+    h, w = img.shape[:2]
+    pw = int(round(w * float(pad_frac)))
+    ph = int(round(h * float(pad_frac)))
+    if pw < 1 and ph < 1:
+        return img, 0, 0
+    out = cv2.copyMakeBorder(
+        img, ph, ph, pw, pw, cv2.BORDER_CONSTANT, value=(0, 0, 0)
+    )
+    return out, pw, ph
+
+
+def _resize_to_max_long_side(img, max_long_side):
+    """
+    Uniformly scale so max(width, height) <= max_long_side (helps SCRFD when the face
+    is huge in pixel space relative to det_size). Returns (work_bgr, scale_x, scale_y)
+    mapping work coordinates -> original image coordinates.
+    """
+    h, w = img.shape[:2]
+    m = max(h, w)
+    if m <= max_long_side:
+        return img, 1.0, 1.0
+    s = max_long_side / float(m)
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    work = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    sx = w / float(nw)
+    sy = h / float(nh)
+    return work, sx, sy
+
+
+def _iter_pyramid_long_sides(max_dim):
+    """
+    Long-side targets to try, smallest first when the source is large: downscaled
+    detection first (large-in-frame faces), then progressively larger up to full res
+    (small / distant faces).
+    """
+    if max_dim <= 720:
+        return [max_dim]
+    rungs = [640, 720, 800, 896, 960, 1024, 1152, 1280]
+    caps = [c for c in rungs if c < max_dim]
+    caps.append(max_dim)
+    return sorted(set(caps))
+
+
+def _map_face_from_work_to_source(face, sx, sy, pad_w, pad_h):
+    """Map bbox / landmarks from detector work image back to unpadded source coordinates."""
+    bb = np.asarray(face.bbox, dtype=np.float64)
+    face.bbox = np.array(
+        [
+            bb[0] * sx - pad_w,
+            bb[1] * sy - pad_h,
+            bb[2] * sx - pad_w,
+            bb[3] * sy - pad_h,
+        ],
+        dtype=np.float32,
+    )
+    kps = getattr(face, "kps", None)
+    if kps is not None:
+        k = np.asarray(kps, dtype=np.float64).copy()
+        k[:, 0] = k[:, 0] * sx - pad_w
+        k[:, 1] = k[:, 1] * sy - pad_h
+        face.kps = k.astype(np.float32)
+
+
+def _det_thresh_and_size_sweep(analyser, work, ctx_id):
+    """Single-resolution sweep (no restore)."""
+    h, w = work.shape[:2]
+    if h < 1 or w < 1:
+        return []
+    det_sizes = iter_source_face_det_sizes(h, w)
+    for det_thresh in _SOURCE_FACE_DET_THRESHOLDS:
+        for det in det_sizes:
+            _prepare_face_detector(analyser, ctx_id, det_thresh, (det, det))
+            faces = analyser.get(work)
+            if faces:
+                return faces
+    return []
+
+
+def get_faces_adaptive_det_size(analyser, img, ctx_id=0):
+    """
+    Optionally pad (margin) so huge in-frame faces shrink vs the canvas, then resize
+    to a pyramid of long-side caps, run det_thresh x det_size sweeps, map boxes back
+    to original (unpadded) coordinates. Restores default det_size / det_thresh after.
+    """
+    if img is None or not hasattr(img, "shape") or len(img.shape) < 2:
+        return []
+    ho, wo = img.shape[:2]
+    if ho < 1 or wo < 1:
+        return []
+    try:
+        for pad_frac in _SOURCE_FACE_PAD_FRACS:
+            img_p, pad_w, pad_h = _symmetric_pad_for_detection(img, pad_frac)
+            mo = max(img_p.shape[0], img_p.shape[1])
+            for cap in _iter_pyramid_long_sides(mo):
+                work, sx, sy = _resize_to_max_long_side(img_p, cap)
+                faces = _det_thresh_and_size_sweep(analyser, work, ctx_id)
+                if faces:
+                    for f in faces:
+                        _map_face_from_work_to_source(f, sx, sy, pad_w, pad_h)
+                    return faces
+        return []
+    finally:
+        _prepare_face_detector(analyser, ctx_id, _DEFAULT_DET_THRESH, _DEFAULT_DET_SIZE)
+
 
 def prepare_swappers_and_analysers(args):
     global get_model
@@ -591,27 +1188,30 @@ def prepare_swappers_and_analysers(args):
     sess_options = get_sess_options()
     swappers = []
     analysers = []
-    for idx, providers in enumerate(provider_list):
+    for idx, (device_id, providers) in enumerate(provider_list):
         if not args['no_faceswap']:
             if args['optimization'] == "fp16":
                 
                 if globalsz.args['fastload']:
                     from swapperfp16 import get_model
-                swappers.append(get_model("inswapper_128.fp16.onnx", session_options=sess_options, providers=providers))
+                swappers.append(get_model("inswapper_128.fp16.onnx", argsz=args, session_options=sess_options, providers=providers))
             elif args['optimization'] == "int8":
                 if "CUDAExecutionProvider" in provider_list:
                     print("int8 may not work on gpu properly and might load your cpu instead")
                     
                 if globalsz.args['fastload']:
                     from swapperfp16 import get_model
-                swappers.append(get_model("inswapper_128.quant.onnx", session_options=sess_options, providers=providers))
+                swappers.append(get_model("inswapper_128.quant.onnx", argsz=args, session_options=sess_options, providers=providers))
             else:
-                swappers.append(insightface.model_zoo.get_model("inswapper_128.onnx", session_options=sess_options, providers=providers))
-        else:
+                
+                if globalsz.args['fastload']:
+                    from swapperfp16 import get_model
+                swappers.append(get_model("inswapper_128.onnx", argsz=args, session_options=sess_options, providers=providers))
+        else: #insightface.model_zoo.
             swappers.append(None)
 
         analysers.append(insightface.app.FaceAnalysis(name='buffalo_l',allowed_modules=["recognition", "detection"], providers=providers, session_options=sess_options))
-        analysers[idx].prepare(ctx_id=0, det_size=(256, 256)) #640, 640
+        analysers[idx].prepare(ctx_id=0, det_size=(640, 640)) #640, 640
     return swappers, analysers
 
 def download(link, filename):

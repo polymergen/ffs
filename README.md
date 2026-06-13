@@ -1,55 +1,12 @@
 # FastFaceSwap
 just a little project for fast face swapping using one picture. Now supports multigpu! (Almost, check the ending of readme)
 ## join my discord server https://discord.gg/hzrJBGPpgN
-
-# If you want to use CLIP, occluder etc, please use banana branch (it's in development, has some bugs)
-
 ## requirements:
 -python 3.10
 
 -cuda 11.7 with cudnn
 
 -everything else is installed automatically!
-
-# how to install
-
-## for windows: I prefer using cmd, not powershell. Sometimes it bugs out, so please, use cmd
-
-- clone the repo
-
-if you are on windows with nvidia gpu:
-
-- install_windows.cmd
-
-if you are on windows with amd gpu:
-
-- install_directml_windows.cmd
-
-if you are on linux with nvidia gpu:
-
-- install_linux.sh
-
-if you are on mac, Im not sure if it's going to work properly, but:
-
-- install_mac.sh
-
-if you are on a phone (android), and want to run it for some reason, you are not really supported, but I managed it to run in termux with ubuntu 22.04 (installed inside termux)
-
-- install_termux.sh
-
-Note for linux guys with permission denied:
-`chmod +x install_linux.sh` (or whatever your installer is)
-
-then to start the environment:
-
-- start_venv_windows.cmd (if you are on windows)
-
-- start_venv_linux.sh (if you are on linux or android)
-
-- start_mac.sh (if you are on mac)
-
-Note for linux guys with permission denied: same as installer, `chmod +x start_venv_linux.sh` (or whatever you need to run)
-
 
 # how to run
 
@@ -128,10 +85,6 @@ fast enhancer is still in development, color correction is needed! Sorry for inc
 
 To choose the gpu you want to run on: in globalsz.py, on the line with `select_gpu = None` you can make it `select_gpu = [0, 1]` or something similar (these numbers are id of gpus, starting from 0).
 
-to use all gpus, `select_gpu = None`
-
-Multigpu mode for now only supports just face swapping, **without the enhancer**!!! So if you want enhancer to work, for now select only one gpu.
-
 # please read at least TLDR
 
 TL;DR. This tool was created just to make fun to remake memes, put yourself in the movies and other fun things. Some people on the other hand are doing some nasty things using this software, which is not intended way to use this software. Please be a good person, and don’t do harm to other people. Do not hold my liable for anything.
@@ -155,3 +108,6 @@ Feedback and Improvement: We encourage users to provide feedback on their experi
 
 By using this tool, you acknowledge that you have read and understood this disclaimer. You agree to use the tool responsibly and in accordance with all applicable laws and ethical standards. The developers of this tool retain the right to modify, suspend, or terminate access to the tool at their discretion.
 
+to use all gpus, `select_gpu = None`
+
+Multigpu mode for now only supports just face swapping, **without the enhancer**!!! So if you want enhancer to work, for now select only one gpu.

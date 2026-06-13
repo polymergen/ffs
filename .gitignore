@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.vscode/
+
+# Local media / shortcuts
+*.lnk
+video.mp4
+video.mp4_temp.mp4
+
+# Large model weights (download via install_windows.cmd or install scripts)
+inswapper_128.onnx
+inswapper_128.onnx.bc
+inswapper_128.fp16.onnx
+inswapper_128.quant.onnx
+GFPGANv1.4.onnx
+GFPGANv1.4.onnx,bc
+GFPGANv1.4.pth
+gfpgan_1.4.onnx
+complex_256_v7_stage3_12999.h5
+CodeFormer/weights/
+weights/RealESRGAN_*.pth
+weights/occluder.ckpt
+gfpgan/weights/*.pth
