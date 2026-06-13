@@ -89,6 +89,18 @@ def _swap_all_faces(swapper, analyser, source_face, target_path, output_path):
     return output_path
 
 
+def _reveal_folder(path):
+    folder = os.path.normpath(os.path.dirname(path))
+    if sys.platform == "win32":
+        os.startfile(folder)
+    elif sys.platform == "darwin":
+        import subprocess
+        subprocess.run(["open", folder], check=False)
+    else:
+        import subprocess
+        subprocess.run(["xdg-open", folder], check=False)
+
+
 def main():
     import tkinter as tk
     from tkinter import filedialog, messagebox
@@ -168,7 +180,7 @@ def main():
             f"Face swap saved to:\n{output_path}\n\nOpen the folder containing the file?",
         )
         if open_folder:
-            os.startfile(os.path.normpath(os.path.dirname(output_path)))
+            _reveal_folder(output_path)
     except Exception as exc:
         messagebox.showerror("Quick Face Swap – Error", str(exc))
         print(f"Error: {exc}", file=sys.stderr)
