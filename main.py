@@ -10,6 +10,11 @@ tick_color = "#222831"
 tick_background_color = "#EEEEEE"
 border_color = "#444A53"
 selector_color = "#0E8388"
+# Source-face gallery folder. Override with FFS_SOURCE_FACE_GALLERY env var.
+SOURCE_FACE_GALLERY_DIR = os.environ.get(
+    "FFS_SOURCE_FACE_GALLERY",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "source_faces"),
+)
 parser = argparse.ArgumentParser()
 parser.add_argument('-f', '--face', help='use this face', dest='face', default="face.jpg")
 parser.add_argument('-t', '--target', help='replace this face. If camera, use integer like 0',default="0", dest='target_path')
@@ -514,30 +519,78 @@ while True:
             row_counter += 1
         
         #if args['preview']:
+        # Tk.Scale maps the whole [from,to] range to ~100–300px; for 30k+ frames one pixel = hundreds of frames.
+        # Use a fixed 0..SLIDER_PERMILLE timeline and map to frame indices so scrubbing stays usable.
+        SLIDER_PERMILLE = 10000
+        _slider_syncing = [False]
+
+        def _permille_to_frame(permille, fn):
+            fn = max(1, int(fn))
+            if fn <= 1:
+                return 1
+            try:
+                p = float(permille)
+            except (TypeError, ValueError):
+                return 1
+            p = max(0.0, min(float(SLIDER_PERMILLE), p))
+            return max(1, min(fn, 1 + int(round(p * (fn - 1) / float(SLIDER_PERMILLE)))))
+
+        def _frame_to_permille(idx, fn):
+            fn = max(1, int(fn))
+            idx = max(1, min(fn, int(idx)))
+            if fn <= 1:
+                return 0
+            return int(round((idx - 1) * float(SLIDER_PERMILLE) / float(fn - 1)))
+
         def on_slider_move(value):
             global videos
-            videos[current_video]["current_frame_index"] = int(value)
-        
+            if _slider_syncing[0]:
+                return
+            if not videos or current_video < 0 or current_video >= len(videos):
+                return
+            fn = videos[current_video]["frame_number"]
+            videos[current_video]["current_frame_index"] = _permille_to_frame(value, fn)
+
         def edit_index(amount):
             global videos
-            mini = 0
-            maxi = videos[current_video]['frame_number']
-            videos[current_video]["current_frame_index"] += amount
-            slider.set(videos[current_video]["current_frame_index"])
-        
-        
+            if not videos or current_video < 0 or current_video >= len(videos):
+                return
+            v = videos[current_video]
+            fn = max(1, int(v["frame_number"]))
+            v["current_frame_index"] = max(1, min(fn, int(v["current_frame_index"]) + int(amount)))
+            _slider_syncing[0] = True
+            try:
+                slider.set(_frame_to_permille(v["current_frame_index"], fn))
+            finally:
+                _slider_syncing[0] = False
+
         def edit_play(amount):
             global videos, frame_move
             frame_move = amount
         frame_amount = count_frames(args['target_path'])
-        label = tk.Label(left_frame, text="frame number", fg=text_color, bg=background_color)
+        label = tk.Label(left_frame, text="frame scrub (0–100% of clip)", fg=text_color, bg=background_color)
         label.grid(row=row_counter, column=0)
         row_counter += 1
-        
-        slider = tk.Scale(left_frame, from_=1, to=frame_amount, fg=text_color, bg=background_color, orient=tk.HORIZONTAL, command=on_slider_move)
+
+        slider = tk.Scale(
+            left_frame,
+            from_=0,
+            to=SLIDER_PERMILLE,
+            resolution=1,
+            length=800,
+            fg=text_color,
+            bg=background_color,
+            orient=tk.HORIZONTAL,
+            command=on_slider_move,
+        )
         slider.grid(row=row_counter, column=0, sticky="ew")
+        _slider_syncing[0] = True
+        try:
+            slider.set(_frame_to_permille(1, max(1, int(frame_amount) or 1)))
+        finally:
+            _slider_syncing[0] = False
         row_counter += 1
-        
+
         frame_count_label = tk.Label(left_frame, text=f"total frames: {frame_amount}", fg=text_color, bg=background_color)
         frame_count_label.grid(row=row_counter, column=0, sticky="ew")
         row_counter += 1
@@ -1148,29 +1201,111 @@ while True:
                 show_error_custom(text=f"Could not add video: {e}")
         def delete_current_video():
             global videos, current_video
+            if not videos:
+                return
             videos.pop(current_video)
-            current_video = 0
+            if videos:
+                current_video = min(current_video, len(videos) - 1)
+            else:
+                current_video = 0
         #yes, one day Im going to release that thing
         button_select_face = tk.Button(right_control_frame, text='Select face',bg=button_color, fg=text_color, command=select_face)
         button_select_face.grid(row=0, column=0, pady=3, sticky='ew')
         select_face_label = tk.Label(right_control_frame, text=f'Face filename: {args["face"]}', fg=text_color, bg=background_color)
         select_face_label.grid(row=1, column=0, pady=3)
+        face_gallery_lf = tk.LabelFrame(
+            right_control_frame,
+            text="Source face gallery (folder)",
+            bg=background_color,
+            fg=text_color,
+            highlightbackground=border_color,
+            highlightthickness=1,
+        )
+        face_gallery_lf.grid(row=2, column=0, sticky="nsew", pady=4, padx=0)
+        right_control_frame.grid_rowconfigure(2, weight=4)
+        gf_toolbar = tk.Frame(face_gallery_lf, bg=background_color)
+        gf_toolbar.pack(fill=tk.X, padx=4, pady=2)
+        face_gallery_inner = tk.Frame(face_gallery_lf, bg=background_color)
+        face_gallery_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 4))
+        face_gallery_inner.grid_rowconfigure(0, weight=1)
+        face_gallery_inner.grid_columnconfigure(0, weight=1)
+        face_gallery_list = ScrolledListBox(face_gallery_inner, height=200, bg=background_color, highlightthickness=0)
+        face_gallery_list.selector_color = selector_color
+        face_gallery_list.text_color = text_color
+        face_gallery_list.face_paths = []
+
+        def refresh_face_gallery():
+            paths = list_image_files_in_folder(SOURCE_FACE_GALLERY_DIR)
+            face_gallery_list.face_paths = paths
+            face_gallery_list.delete_all()
+            rows = []
+            for p in paths:
+                th = face_gallery_thumbnail(p)
+                if th is None:
+                    th = Image.new("RGB", (64, 64), (48, 48, 48))
+                rows.append([os.path.basename(p), th])
+            face_gallery_list.insert_data(rows)
+
+        def on_face_gallery_pick(idx):
+            global args, videos
+            if idx is None or idx < 0:
+                return
+            paths = getattr(face_gallery_list, "face_paths", None) or []
+            if idx >= len(paths):
+                return
+            path = paths[idx]
+            if not models_ready.is_set():
+                show_error_custom(text="Models are still loading. Please wait a few seconds and try again.")
+                return
+            args["face"] = path
+            select_face_label.config(text=f"Face filename: {path}")
+            try:
+                facex = get_primary_face_from_image_path(path)
+            except (ValueError, RuntimeError) as e:
+                show_error_custom(text=str(e))
+                return
+            except Exception as e:
+                show_error_custom(text=f"Could not load face from gallery: {e}")
+                return
+            for v in videos:
+                v["face"] = facex
+                v["old_number"] = -1
+            frame_updater(False)
+
+        face_gallery_list.on_item_selected = on_face_gallery_pick
+        tk.Button(
+            gf_toolbar,
+            text="Refresh list",
+            bg=button_color,
+            fg=text_color,
+            command=refresh_face_gallery,
+        ).pack(side=tk.RIGHT, padx=2)
+        tk.Label(
+            gf_toolbar,
+            text=os.path.basename(SOURCE_FACE_GALLERY_DIR),
+            fg=text_color,
+            bg=background_color,
+            wraplength=200,
+            justify=tk.LEFT,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        refresh_face_gallery()
+
         canvas = tk.Canvas(right_control_frame, height=2, bg=border_color, highlightthickness=0)
-        canvas.grid(row=2, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
+        canvas.grid(row=3, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
         button_select_target = tk.Button(right_control_frame, text='Select target',bg=button_color, fg=text_color, command=select_target)
-        button_select_target.grid(row=3, column=0, pady=3, sticky='ew')
+        button_select_target.grid(row=4, column=0, pady=3, sticky='ew')
         select_target_label = tk.Label(right_control_frame, text=f'Target filename: {args["target_path"]}', fg=text_color, bg=background_color)
-        select_target_label.grid(row=4, column=0, pady=3)
+        select_target_label.grid(row=5, column=0, pady=3)
         canvas2 = tk.Canvas(right_control_frame, height=2, bg=border_color, highlightthickness=0)
-        canvas2.grid(row=5, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
+        canvas2.grid(row=6, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
         button_select_output = tk.Button(right_control_frame, text='Select output',bg=button_color, fg=text_color, command=select_output)
-        button_select_output.grid(row=6, column=0, pady=3, sticky='ew')
+        button_select_output.grid(row=7, column=0, pady=3, sticky='ew')
         select_output_label = tk.Label(right_control_frame, text=f'output filename: {args["output"]}', fg=text_color, bg=background_color)
-        select_output_label.grid(row=7, column=0, pady=3)
+        select_output_label.grid(row=8, column=0, pady=3)
         canvas3 = tk.Canvas(right_control_frame, height=2, bg=border_color, highlightthickness=0)
-        canvas3.grid(row=8, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
+        canvas3.grid(row=9, column=0, columnspan=2, sticky='ew', padx=0, pady=4)
         start_video_frame = tk.Frame(right_control_frame, bg=background_color)
-        start_video_frame.grid(row=9, column=0, sticky="ew")
+        start_video_frame.grid(row=10, column=0, sticky="ew")
         button_start_program = tk.Button(start_video_frame, text="Add this video",bg=button_color, fg=text_color, command=add)
         button_start_program.pack(side=tk.LEFT, fill=tk.X, expand=True)#.grid(row=10, column=0, pady=3, sticky='ew')
         button_select_camera = tk.Button(start_video_frame, text='run from camera',bg=button_color, fg=text_color, command=select_camera)
@@ -1180,18 +1315,18 @@ while True:
         #thread_amount_input = tk.Entry(right_control_frame)
         #thread_amount_input.grid(row=9, column=0)
         selector_frame = tk.Frame(right_control_frame, bg=background_color)
-        selector_frame.grid(row=11, column=0, sticky="nsew", pady=15)
+        selector_frame.grid(row=12, column=0, sticky="nsew", pady=15)
         
         Scrolledlistbox1 = ScrolledListBox(selector_frame)
         Scrolledlistbox1.configure(background=background_color)
         Scrolledlistbox1.selector_color = selector_color
         Scrolledlistbox1.text_color = text_color
         Scrolledlistbox1.grid(row=0, column=0, sticky="nsew")
-        right_control_frame.grid_rowconfigure(11, weight=10)
+        right_control_frame.grid_rowconfigure(12, weight=10)
         button_select_output = tk.Button(right_control_frame, text='Delete selected video',bg=button_color, fg=text_color, command=delete_current_video)
-        button_select_output.grid(row=12, column=0, sticky='ew', pady=4)
+        button_select_output.grid(row=13, column=0, sticky='ew', pady=4)
         render_button_frame = tk.Frame(right_control_frame, bg=background_color)
-        render_button_frame.grid(row=13, column=0, pady=10, sticky="ew")
+        render_button_frame.grid(row=14, column=0, pady=10, sticky="ew")
         row_counter += 1
         render_button = tk.Button(render_button_frame, text='render', bg=button_color, fg=text_color, command=run_it_please)
         render_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -1704,6 +1839,12 @@ while True:
             try:
                 while True:
                     try:
+                        nv = len(videos)
+                        if nv == 0:
+                            time.sleep(0.02)
+                            continue
+                        if current_video < 0 or current_video >= nv:
+                            current_video = max(0, nv - 1)
                         #print(videos[current_video]['rendering'])
                         if current_loop_video != current_video:
                             if args['vcam'] and videos[current_video]["type"] == 1:
@@ -1919,15 +2060,26 @@ while True:
             def update_gui(old_index=0):
                 global frame_index
                 try:
+                    if len(videos) == 0:
+                        return
+                    ci = max(0, min(current_video, len(videos) - 1))
                     update_progress_bar(7, listik[0], listik[1], listik[2], listik[3], listik[4])
                     
                     #if args['preview']:
-                    if old_index != videos[current_video]['current_frame_index']:  
-                        slider.set(videos[current_video]['current_frame_index'])
-                        old_index = videos[current_video]['current_frame_index']
+                    fn = max(1, int(videos[ci]["frame_number"]))
+                    cur = int(videos[ci]["current_frame_index"])
+                    if old_index != cur:
+                        _slider_syncing[0] = True
+                        try:
+                            slider.set(_frame_to_permille(cur, fn))
+                        finally:
+                            _slider_syncing[0] = False
+                        old_index = cur
                     try:
-                        slider.config(to=videos[current_video]["frame_number"])
-                        frame_count_label.config(text=f"total frames: {videos[current_video]['frame_number']}") 
+                        slider.config(from_=0, to=SLIDER_PERMILLE, resolution=1)
+                        frame_count_label.config(
+                            text=f"total frames: {fn} | frame {max(1, min(fn, cur))}"
+                        ) 
                     except:
                         pass
 
@@ -1949,6 +2101,8 @@ while True:
                         Scrolledlistbox1.insert_data(v)
                         root.update_idletasks()
                         if len(videos) > 0:
+                            if current_video >= len(videos) or current_video < 0:
+                                current_video = max(0, len(videos) - 1)
                             videos[current_video]['old_number'] = -1
                         frame_updater(False)
                     #sel = Scrolledlistbox1.curselection()
@@ -1957,16 +2111,19 @@ while True:
                     #else:
                     #    sel = 0
                     sel = Scrolledlistbox1.get_selected_id()
-                    if sel == None:
+                    if sel is None:
                         sel = 0
-                    if sel != current_video:
+                    if len(videos) > 0:
+                        sel = max(0, min(int(sel), len(videos) - 1))
+                    if len(videos) > 0 and sel != current_video:
                         if videos[sel]['rendering'] == True:
                             render_button.config(state=tk.DISABLED)
                             stop_rendering_button.config(state=tk.ACTIVE)
                         else:
                             render_button.config(state=tk.ACTIVE)
                             stop_rendering_button.config(state=tk.DISABLED)
-                    current_video = sel
+                    if len(videos) > 0:
+                        current_video = sel
                 except:
                     pass
                 try:

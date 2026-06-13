@@ -103,7 +103,12 @@ class ScrolledListBox(AutoScroll, tk.Canvas):
         self.itemconfig(self.highlighted_rect, fill=self.selector_color)
 
         self.selected_index = idx  # Store the actual data index
-        print(idx)  # print the index of the clicked item
+        cb = getattr(self, "on_item_selected", None)
+        if callable(cb):
+            try:
+                cb(idx)
+            except Exception as e:
+                print(f"on_item_selected: {e}")
 
     def reset_images(self):
         for i, image in self.original_images.items():
@@ -164,6 +169,11 @@ class ScrolledListBox(AutoScroll, tk.Canvas):
         self.original_images.clear()  # Clear the original images dictionary
         self.image_cache.clear()  # Clear the image cache dictionary
         self.delete('all')  # Remove all canvas items
+        if hasattr(self, "selected_index"):
+            delattr(self, "selected_index")
+        if hasattr(self, "highlighted_rect"):
+            delattr(self, "highlighted_rect")
+
     def delete_selected(self):
         if hasattr(self, 'selected_index'):
             self.delete_by_id(self.selected_index)
@@ -171,10 +181,13 @@ class ScrolledListBox(AutoScroll, tk.Canvas):
 
     def get_selected_id(self):
         """Retrieve the ID of the currently selected item."""
-        if hasattr(self, 'selected_index'):
-            return self.selected_index
-        else:
-            return None  # No item is currently selected
+        if not hasattr(self, "selected_index"):
+            return None
+        idx = self.selected_index
+        if idx < 0 or idx >= len(self.data_list):
+            return None
+        return idx
+
 class ScrolledImageList(AutoScroll, tk.Canvas):
     def __init__(self, master, **kw):
         tk.Canvas.__init__(self, master, **kw)

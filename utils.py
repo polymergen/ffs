@@ -988,6 +988,48 @@ _SOURCE_FACE_DET_THRESHOLDS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15)
 _SOURCE_FACE_PAD_FRACS = (0.0, 0.12, 0.22, 0.35, 0.5)
 
 
+def is_file_readable_as_image(path):
+    """True if Pillow can decode pixels (works for unusual extensions)."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
+
+
+def list_image_files_in_folder(folder_path):
+    """Sorted full paths to regular files that decode as images."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    out = []
+    try:
+        for name in sorted(os.listdir(folder_path)):
+            p = os.path.join(folder_path, name)
+            if os.path.isfile(p) and is_file_readable_as_image(p):
+                out.append(p)
+    except OSError:
+        return []
+    return out
+
+
+def face_gallery_thumbnail(path, max_side=112):
+    """RGB PIL thumbnail for UI; None if unreadable."""
+    try:
+        pil = Image.open(path)
+        pil = ImageOps.exif_transpose(pil)
+        if pil.mode == "RGBA":
+            pil = pil.convert("RGB")
+        elif pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        pil.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        return pil
+    except Exception:
+        return None
+
+
 def imread_bgr_with_exif(path):
     """
     BGR image for OpenCV / InsightFace. Applies EXIF orientation (viewers do; cv2.imread does not),
