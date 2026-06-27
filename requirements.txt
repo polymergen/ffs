@@ -1,19 +1,20 @@
-opencv-python
-insightface
-argparse
-basicsr>=1.4.2
-facexlib>=0.2.5
-lmdb
-pyyaml
-scipy
-tb-nightly
-tqdm
-yapf
-pynvml
-codeformer-pip==0.0.4
-psutil
-ftfy
-segmentation_models_pytorch
-rembg
-mediapipe
-python-magic-bin
+# FastFaceSwap dependencies
+#
+# Use conda + install scripts for a reproducible GPU environment:
+#   Windows: install_conda_windows.cmd
+#   Linux:   ./install_conda_linux.sh
+#
+# Conda env name: PyEditorFromFFS
+#
+# This file lists the main packages; exact pins live in requirements-pip.txt.
+# GPU/CUDA packages (install separately — not reliable from plain pip on all OSes):
+#   torch / torchvision / torchaudio  (CUDA 11.8 wheels)
+#   onnxruntime-gpu
+#   tensorflow-gpu (Windows) or tensorflow 2.10.x (Linux)
+#   protobuf==3.20.2
+
+-r requirements-pip.txt
+
+# Windows only (install script adds this automatically on Windows):
+# python-magic-bin
+# Linux: apt install libmagic1 && pip install python-magic

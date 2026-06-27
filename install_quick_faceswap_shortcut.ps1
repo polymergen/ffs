@@ -15,7 +15,7 @@ function New-Shortcut([string]$LinkPath) {
     $sc = $Wsh.CreateShortcut($LinkPath)
     $sc.TargetPath = $Launcher
     $sc.WorkingDirectory = $ProjectDir
-    $sc.Description = "Pick source face and target image, then face-swap (ffs-gold-2024-09 env)"
+    $sc.Description = "Pick source face and target image, then face-swap (PyEditorFromFFS conda env)"
     $sc.WindowStyle = 1
   # Face / photo icon from shell32
     $sc.IconLocation = "$env:SystemRoot\System32\imageres.dll,67"
