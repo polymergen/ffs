@@ -2,6 +2,34 @@
 just a little project for fast face swapping using one picture. Now supports multigpu! (Almost, check the ending of readme)
 ## join my discord server https://discord.gg/hzrJBGPpgN
 ## requirements:
+- Python 3.9 (via **conda** — recommended for CUDA/GPU libs)
+- NVIDIA GPU + CUDA 11.x drivers (CUDA 11.8 wheels used for PyTorch / ONNX Runtime)
+- Conda env name: **`PyEditorFromFFS`**
+
+## install (new machine)
+
+**Windows**
+```bat
+git clone git@github.com:polymergen/ffs.git
+cd ffs
+install_conda_windows.cmd
+fastfaceswap.bat
+```
+
+**Linux**
+```bash
+git clone git@github.com:polymergen/ffs.git
+cd ffs
+chmod +x install_conda_linux.sh download_models.sh fastfaceswap.sh quick_image_faceswap.sh
+./install_conda_linux.sh
+./fastfaceswap.sh
+```
+
+This creates conda env `PyEditorFromFFS`, installs pinned pip deps (`requirements-pip.txt`), GPU packages (PyTorch cu118, onnxruntime-gpu, TensorFlow 2.10), and downloads model weights.
+
+Override env name: `set FFS_CONDA_ENV=other-name` (Windows) or `export FFS_CONDA_ENV=other-name` (Linux).
+
+-old requirements below kept for reference-
 -python 3.10
 
 -cuda 11.7 with cudnn

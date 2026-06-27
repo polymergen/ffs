@@ -44,8 +44,36 @@ import sys
 #if not globalsz.args['nocuda']:
 #    torch.backends.cudnn.benchmark = True
 import tqdm
-import magic    #pip install python-magic-bin https://github.com/Yelp/elastalert/issues/1927
-mime = magic.Magic(mime=True)
+
+_mime_magic = None
+_mime_magic_unavailable = False
+
+
+def mime_from_file(path):
+    """MIME type from file contents (libmagic) or extension fallback."""
+    global _mime_magic, _mime_magic_unavailable
+    if not _mime_magic_unavailable:
+        if _mime_magic is None:
+            try:
+                import magic
+                _mime_magic = magic.Magic(mime=True)
+            except Exception:
+                _mime_magic_unavailable = True
+        if _mime_magic is not None:
+            return _mime_magic.from_file(path)
+    import mimetypes
+    guessed, _ = mimetypes.guess_type(path)
+    if guessed:
+        return guessed
+    ext = os.path.splitext(path)[1].lower()
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif"}
+    video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".wmv", ".mif"}
+    if ext in image_exts:
+        return "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
+    if ext in video_exts:
+        return "video/mp4" if ext == ".mp4" else f"video/{ext.lstrip('.')}"
+    raise ValueError(f"Could not determine MIME type for {path}")
+
 if not globalsz.args['fastload']:
     import mediapipe as mp
     from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -707,7 +735,7 @@ def create_new_cap(file, face_, output_,batch_post="", grim=False):
     if not isinstance(file, int):
         if not is_integer(file):
             try:
-                video_type = mime.from_file(file)
+                video_type = mime_from_file(file)
             except Exception as e:
                 print(f"{file} is not image or video, error from video_type: {e}")
                 return
