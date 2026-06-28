@@ -1,0 +1,1 @@
+python main.py -f d:\ini\UserSettings\Google\Config\LandingZone\f\01457.jpg -t d:\ini\UserSettings\Google\Config\PAWS\dirty\various\LimpingUnhealthyJunco.mp4 -o D:\ini\UserSettings\Google\Config\LandingZone\test.mp4 --threads 6 --cli --face-enhancer "real_esrgan"
